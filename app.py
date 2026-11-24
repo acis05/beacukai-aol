@@ -32,7 +32,7 @@ if os.getenv('RAILWAY_ENVIRONMENT'):
  if not db_url.startswith('postgresql+psycopg://'): raise RuntimeError('PostgreSQL required on Railway')
 engine=create_engine(db_url,pool_pre_ping=True)
 with engine.begin() as c:
- for sql in ['CREATE TABLE IF NOT EXISTS items (code VARCHAR(100) PRIMARY KEY, name TEXT NOT NULL, category VARCHAR(30), unit VARCHAR(30))','CREATE TABLE IF NOT EXISTS movements (ref VARCHAR(200) PRIMARY KEY, day VARCHAR(10), code VARCHAR(100) REFERENCES items(code), qty NUMERIC(24,6), kind VARCHAR(20))','CREATE TABLE IF NOT EXISTS bc (ref VARCHAR(200) PRIMARY KEY, doc_type TEXT, doc_no TEXT, doc_date VARCHAR(10))','CREATE TABLE IF NOT EXISTS settings (k VARCHAR(50) PRIMARY KEY, v TEXT)','CREATE TABLE IF NOT EXISTS audit (event TEXT, stamp VARCHAR(40))']:
+ for sql in ['CREATE TABLE IF NOT EXISTS items (code VARCHAR(100) PRIMARY KEY, name TEXT NOT NULL, category VARCHAR(30), unit VARCHAR(30))','CREATE TABLE IF NOT EXISTS movements (ref VARCHAR(200) PRIMARY KEY, day VARCHAR(10), code VARCHAR(100) REFERENCES items(code), qty NUMERIC(24,6), kind VARCHAR(20))','CREATE TABLE IF NOT EXISTS bc (ref VARCHAR(200) PRIMARY KEY, doc_type TEXT, doc_no TEXT, doc_date VARCHAR(10))','CREATE TABLE IF NOT EXISTS settings (k VARCHAR(50) PRIMARY KEY, v TEXT)','CREATE TABLE IF NOT EXISTS accurate_categories (code VARCHAR(100) PRIMARY KEY, label TEXT)', 'CREATE TABLE IF NOT EXISTS audit (event TEXT, stamp VARCHAR(40))']:
   c.execute(text(sql))
 def auth(u:HTTPBasicCredentials=Depends(basic)):
  p=os.getenv('ADMIN_PASSWORD','');
@@ -101,23 +101,28 @@ def sync(r:Request):
  if not db_id: raise HTTPException(409,'Pilih database Accurate dahulu')
  h={'Authorization':'Bearer '+token()}; d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id}); host=d['host']; u=urlparse(host)
  if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id'): raise HTTPException(502,'Host tidak valid')
- h['X-Session-ID']=d['session']; page=1; rows=[]
- while True:
-  d=api(host+'/accurate/api/item/list.do',h,{'fields':'id,no,name','sp.page':page}); rows.extend(d['d'])
-  if page>=d['sp']['pageCount']: break
-  page+=1
-  if page>1000: raise HTTPException(502,'Batas halaman')
+ h['X-Session-ID']=d['session']
+ from master_sync import master_rows
+ def get(path,params): return api(host.rstrip('/')+'/accurate/api/'+path,h,params)
+ try: rows=list(master_rows(get))
+ except Exception as e: return HTMLResponse(page('Sinkron master gagal','<section><p class="notice">'+html.escape(str(e) if isinstance(e,ValueError) else type(e).__name__)+'</p><p>Periksa scope item_view dan item_category_view serta response detail.</p><a href="/">Kembali</a></section>'),status_code=502)
  with engine.begin() as c:
-  if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items IN SHARE ROW EXCLUSIVE MODE'))
-  if c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()!=db_id: raise HTTPException(409,'Pilihan database berubah; ulangi sinkronisasi')
-  for x in rows: c.execute(text('INSERT INTO items(code,name) VALUES (:code,:name) ON CONFLICT(code) DO UPDATE SET name=:name'),{'code':x['no'],'name':x['name']})
+  if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items, movements IN SHARE ROW EXCLUSIVE MODE'))
+  if c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()!=db_id: raise HTTPException(409,'Database berubah')
+  for x in rows:
+   old=c.execute(text('SELECT unit FROM items WHERE code=:code'),x).scalar()
+   if old and x['unit'] and old.casefold()!=x['unit'].casefold() and c.execute(text('SELECT COUNT(*) FROM movements WHERE code=:code'),x).scalar(): raise HTTPException(409,'Satuan berubah untuk '+x['code']+'; rekonsiliasi dahulu')
+   c.execute(text('INSERT INTO items(code,name,category,unit) VALUES (:code,:name,:category,:unit) ON CONFLICT(code) DO UPDATE SET name=:name,category=COALESCE(:category,items.category),unit=COALESCE(:unit,items.unit)'),x)
+   c.execute(text('INSERT INTO accurate_categories(code,label) VALUES (:code,:label) ON CONFLICT(code) DO UPDATE SET label=:label'),x)
   audit(c,'sync items '+str(len(rows)))
- return RedirectResponse('/',303)
+ esc=lambda x:html.escape(str(x or 'Belum dikenali'))
+ return HTMLResponse(page('Hasil sinkron master','<section><p>Master: '+str(len(rows))+'; satuan belum terbaca: '+str(sum(not x['unit'] for x in rows))+'; kategori BC belum dikenali otomatis: '+str(sum(not x['category'] for x in rows))+'</p><table><tr><th>Kode</th><th>Nama</th><th>Kategori Accurate</th><th>Kategori BC otomatis</th><th>Satuan</th></tr>'+''.join('<tr>'+''.join('<td>'+esc(x[k])+'</td>' for k in ('code','name','label','category','unit'))+'</tr>' for x in rows)+'</table><a href="/">Kembali</a></section>'))
+
 CATS=['BB','BP','FG','WIP','ASET','SCRAP']; KINDS=['IN','OUT','PROD','TRANSFER','ADJ','OPEN']
 HEADERS={'items':['code','name','category','unit'],'movements':['ref','day','code','qty','kind'],'bc':['ref','doc_type','doc_no','doc_date']}
 @app.get('/template/{table}',dependencies=[Depends(auth)])
 def template(table:str):
- if table not in HEADERS: raise HTTPException(404)
+ if table != 'bc': raise HTTPException(404)
  return excel(HEADERS[table],[],table)
 def excel(headers,rows,name):
  w=Workbook(); s=w.active; s.append(headers)
@@ -130,7 +135,7 @@ def excel(headers,rows,name):
 def upload(r:Request,table:str,file:UploadFile=File(...)):
  guard(r)
  if not selected_db(): raise HTTPException(409,'Pilih database Accurate sebelum import')
- if table not in HEADERS: raise HTTPException(404)
+ if table != 'bc': raise HTTPException(404)
  try:
   raw=file.file.read(5_000_001)
   if len(raw)>5_000_000: raise ValueError('File terlalu besar')
@@ -153,7 +158,7 @@ def upload(r:Request,table:str,file:UploadFile=File(...)):
      if not c.execute(text('SELECT ref FROM movements WHERE ref=:ref'),d).scalar(): raise ValueError('Referensi mutasi tidak ditemukan')
     c.execute(text(f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join(':'+k for k in cols)}) ON CONFLICT({cols[0]}) DO UPDATE SET "+','.join(k+'=:'+k for k in cols[1:])),d)
    audit(c,'import '+table)
- except Exception as e: raise HTTPException(400,'Import gagal; periksa format, referensi dan nilai data') from e
+ except Exception as e: raise HTTPException(400,'Import gagal pada baris '+str(locals().get('i',1))+': '+(str(e) if isinstance(e,ValueError) else type(e).__name__)) from e
  return RedirectResponse('/',303)
 NAMES=['Pemasukan Barang','Pengeluaran Barang','Mutasi Bahan Baku dan Penolong','Mutasi Barang Jadi','Posisi WIP','Mutasi Mesin dan Peralatan','Mutasi Scrap']
 def report(n,start,end):
@@ -180,9 +185,9 @@ def home():
  esc=lambda x:html.escape(str(x))
  stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Dokumen BC'],counts))
  body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
- body+=sync_panel()
+ body+='<section><a class="btn" href="/stock-history">Preview histori stok 7 hari</a></section>'+sync_panel()
  body+=scope_panel()
- body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in zip(HEADERS,['Klasifikasi barang','Mutasi persediaan','Dokumen BC']))+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Saldo awal dan dokumen BC tetap perlu dilengkapi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
+ body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in [('bc','Dokumen BC')])+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Saldo awal dan dokumen BC tetap perlu dilengkapi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
 
 # Professional interface and read-only transaction preview.
@@ -301,7 +306,7 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
     with engine.connect() as c: masters={x[0]:(x[1],x[2]) for x in c.execute(text('SELECT code,unit,category FROM items'))}
     rows,issues,stats=collect(get,k,start,end,db_id,masters)
     summary=f"API: {stats['listed']} transaksi, {stats['details']} detail, {stats['outside']} di luar periode"
-    if issues: results.append((MODULES[k],0,summary+'; Tidak disimpan: '+ '; '.join(issues[:30]))); continue
+    if issues and not rows: results.append((MODULES[k],0,summary+'; Tidak disimpan: '+ '; '.join(issues[:30]))); continue
     with engine.begin() as c:
      if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items, movements, bc IN SHARE ROW EXCLUSIVE MODE'))
      if c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()!=db_id: raise ValueError('Database berubah')
@@ -316,7 +321,7 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
       if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
       c.execute(text('INSERT INTO movements(ref,day,code,qty,kind) VALUES (:ref,:day,:code,:qty,:kind) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,kind=:kind'),row)
      audit(c,'sync '+k+' '+str(len(rows)))
-    results.append((MODULES[k],len(rows),'Disimpan/diperbarui; '+summary if rows else 'Tidak ada mutasi; '+summary))
+    results.append((MODULES[k],len(rows),'Disimpan/diperbarui; '+summary+('; KENDALA: '+'; '.join(issues[:30]) if issues else '') if rows else 'Tidak ada mutasi; '+summary))
    except Exception as e: results.append((MODULES[k],0,'Gagal: '+(str(e) if isinstance(e,ValueError) else type(e).__name__)))
  except Exception as e: results.append(('Koneksi',0,type(e).__name__))
  return HTMLResponse(page('Hasil sinkronisasi','<section><p class="notice">Draft. Periksa semua kendala sebelum menggunakan laporan.</p><table><tr><th>Modul</th><th>Baris</th><th>Status</th></tr>'+''.join('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in x)+'</tr>' for x in results)+'</table><a class="btn" href="/#laporan">Buka laporan</a></section>'),headers={'Cache-Control':'no-store'})
@@ -334,6 +339,18 @@ try{for(let t=+a;t<=+b;t+=7*day){const end=Math.min(t+6*day,+b);for(const m of m
 const label=iso(t)+' – '+iso(end)+' / '+m;status.textContent='Memproses '+(done+1)+'/'+total+' '+label+' — jangan tutup halaman.';
 const payload=new FormData();for(const [k,v] of data)payload.set(k,v);payload.set('start',iso(t));payload.set('end',iso(end));payload.set('module',m);
 const section=document.createElement('section'), heading=document.createElement('h3');heading.textContent=label;section.append(heading);out.append(section);
-try{const res=await fetch(f.action,{method:'POST',body:payload,credentials:'same-origin'});const doc=new DOMParser().parseFromString(await res.text(),'text/html');const table=doc.querySelector('main table');if(!res.ok||!table)throw Error('HTTP '+res.status+' / hasil tidak tersedia');section.append(document.importNode(table,true));if(!table.textContent.includes('Disimpan/diperbarui')&&!table.textContent.includes('Tidak ada mutasi;'))failed++;}catch(err){failed++;const p=document.createElement('p');p.textContent='Batch gagal atau status tidak diketahui: '+err.message;section.append(p);}
+try{const res=await fetch(f.action,{method:'POST',body:payload,credentials:'same-origin'});const doc=new DOMParser().parseFromString(await res.text(),'text/html');const table=doc.querySelector('main table');if(!res.ok||!table)throw Error('HTTP '+res.status+' / hasil tidak tersedia');section.append(document.importNode(table,true));if(table.textContent.includes('KENDALA:')||!table.textContent.includes('Disimpan/diperbarui')&&!table.textContent.includes('Tidak ada mutasi;'))failed++;}catch(err){failed++;const p=document.createElement('p');p.textContent='Batch gagal atau status tidak diketahui: '+err.message;section.append(p);}
 done++;}}status.textContent='Selesai '+done+'/'+total+' batch; '+failed+' bermasalah. Periksa hasil sebelum membuka laporan.';}finally{btn.disabled=false;}
 });})();</script>"""
+
+@app.get('/stock-history',dependencies=[Depends(auth)])
+def stock_history(page_no:int=1):
+ import json
+ if page_no<1: raise HTTPException(400,'Halaman tidak valid')
+ db_id=selected_db()
+ if not db_id: raise HTTPException(409,'Pilih database dahulu')
+ h={'Authorization':'Bearer '+token()}; d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id}); u=urlparse(d['host'])
+ if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password or u.query or u.fragment: raise HTTPException(502,'Host tidak valid')
+ h['X-Session-ID']=d['session']
+ result=api(d['host'].rstrip('/')+'/accurate/api/item/stock-mutation-history.do',h,{'sp.page':page_no,'sp.pageSize':20})
+ return HTMLResponse(page('Histori stok Accurate','<section><p>Preview 7 hari terakhir; belum diposting agar tidak menggandakan mutasi.</p><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre><a href="/stock-history?page_no='+str(page_no+1)+'">Halaman berikutnya</a> · <a href="/">Kembali</a></section>'),headers={'Cache-Control':'no-store'})

@@ -1,5 +1,5 @@
 import re
-REQUIRED='item_view job_order_view roll_over_view receive_item_view delivery_order_view item_adjustment_view'
+REQUIRED='item_view item_category_view stock_mutation_history_view job_order_view roll_over_view receive_item_view delivery_order_view item_adjustment_view'
 def scopes(value):
     if not isinstance(value,str): return None
     return {x for x in re.split(r'[\s,]+',value) if re.fullmatch(r'[a-zA-Z0-9_]+',x)}

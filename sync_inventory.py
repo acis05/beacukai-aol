@@ -40,7 +40,7 @@ def collect(get,module,start,end,db_id,masters):
       if base_unit and master_unit.strip().casefold()==base_unit.strip().casefold():
        q=Decimal(str(line['quantityDefault'])) if line.get('quantityDefault') is not None else q*Decimal(str(line.get('unitRatio',1)))
       elif master_unit.strip().casefold()!=unit.strip().casefold(): raise ValueError('Satuan master berbeda: '+str(code)+' / '+unit+' / '+master_unit)
-     elif master_unit.strip().casefold()!=unit.strip().casefold() or not category: raise ValueError('Kategori atau satuan belum sesuai: '+str(code))
+     elif master_unit.strip().casefold()!=unit.strip().casefold(): raise ValueError('Satuan belum sesuai: '+str(code))
      if not q.is_finite() or q<=0 or q>=Decimal('1000000000000000000') or q!=q.quantize(Decimal('0.000001')): raise ValueError('Qty tidak valid')
      if module=='item-adjustment': raise ValueError('Arah penyesuaian perlu validasi JSON asli')
      kind,sign={'receive-item':('IN',1),'delivery-order':('OUT',-1),'job-order':('PROD',-1),'roll-over':('PROD',1)}[module]

@@ -1,8 +1,2 @@
-# v2.6
-- Penerimaan memakai quantity/quantityDefault sesuai satuan master, bukan availableQuantity.
-- Pemasukan tidak mensyaratkan kategori barang, tetapi kode dan satuan master tetap wajib.
-- Hasil sinkron menampilkan jumlah transaksi API, detail dan transaksi di luar periode; batch kosong tidak disebut berhasil menyimpan.
-- Uji lokal menggunakan dua detail penerimaan yang diberikan pengguna: empat baris mutasi. API list disimulasikan; belum diuji di Railway.
-- Pertahankan PostgreSQL, SESSION_SECRET dan konfigurasi OAuth. Backup sebelum deploy. Upload seluruh isi ZIP ke GitHub.
-- Sinkron Penerimaan Barang 01/11/2026–24/11/2026, kemudian buka laporan Pemasukan pada periode yang sama. Pastikan satuan master PCS, KG, Ltr sesuai kode.
-- Modul lain tetap draft; arah penyesuaian belum tervalidasi. Dokumen BC dan saldo awal tetap perlu dilengkapi.
+# v2.7 Accurate First
+Backup PostgreSQL, replace all repository files, redeploy. Keep SESSION_SECRET and DATABASE_URL. Enable item_category_view and stock_mutation_history_view, reconnect OAuth and select same database. Sync master then transactions. Excel import only BC; old data retained. Master mapping uses provisional response fields unit1/unit1Name and itemCategory/itemCategoryName/itemCategoryId; unknown categories displayed, existing classifications retained. Stock history is read-only preview, not automatic posting. Adjustment direction, opening balances, WIP and customs compliance remain unvalidated. Partial valid transaction batches can be saved; review all warnings. No live Accurate test.
