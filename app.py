@@ -53,6 +53,9 @@ def auth(r:Request,u:HTTPBasicCredentials=Depends(basic)):
  if not role: raise HTTPException(401,'Login diperlukan',headers={'WWW-Authenticate':'Basic'})
  path=r.url.path
  if role!='admin' and (path.startswith(('/users','/databases','/oauth','/disconnect')) or (role=='viewer' and path not in ('/',) and not path.startswith('/report/'))): raise HTTPException(403,'Akses tidak diizinkan')
+ if path.startswith('/customs') and role not in ('admin','exim'): raise HTTPException(403,'Akses dokumen BC tidak diizinkan')
+ if role=='exim' and path!='/' and not path.startswith(('/report/','/customs')): raise HTTPException(403,'Akses tidak diizinkan')
+ r.state.username=u.username
  r.state.role=role
  return role
 def guard(r:Request):
@@ -185,7 +188,7 @@ def report(n,start,end):
  with engine.connect() as c:
   p={'a':start.isoformat(),'b':end.isoformat()}
   if n<=2:
-   p['kind']='IN' if n==1 else 'OUT'; sql='SELECT m.day,m.ref,m.code,i.name,i.unit,m.qty,b.doc_type,b.doc_no,b.doc_date,mc.value FROM movements m JOIN items i ON i.code=m.code LEFT JOIN bc b ON b.ref=m.ref LEFT JOIN movement_cost mc ON mc.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.kind=:kind ORDER BY m.day,m.ref'; headers=['Tanggal','Referensi','Kode','Barang','Satuan','Qty bertanda','Jenis BC','Nomor BC','Tanggal BC','Nilai Barang']
+   p['kind']='IN' if n==1 else 'OUT'; sql='SELECT m.day,COALESCE(mm.number,m.ref),m.code,i.name,i.unit,m.qty,b.doc_type,b.doc_no,b.doc_date,mc.value FROM movements m JOIN items i ON i.code=m.code LEFT JOIN bc b ON b.ref=m.ref LEFT JOIN movement_meta mm ON mm.ref=m.ref LEFT JOIN movement_cost mc ON mc.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.kind=:kind ORDER BY m.day,m.ref'; headers=['Tanggal','Referensi','Kode','Barang','Satuan','Qty bertanda','Jenis BC','Nomor BC','Tanggal BC','Nilai Barang']
   else:
    p['cat']={3:'BB',4:'FG',5:'WIP',6:'ASET',7:'SCRAP'}[n]; sql="SELECT i.code,i.name,i.unit,COALESCE(SUM(CASE WHEN m.day<:a THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.qty>0 AND m.kind<>'ADJ' THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.qty<0 AND m.kind<>'ADJ' THEN -m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.kind='ADJ' THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day<=:b THEN m.qty ELSE 0 END),0) FROM items i LEFT JOIN movements m ON m.code=i.code WHERE (i.category=:cat OR (:cat='BB' AND i.category='BP')) GROUP BY i.code,i.name,i.unit ORDER BY i.code"; headers=['Kode','Barang','Satuan','Awal','Masuk','Keluar','Penyesuaian','Akhir']
   if n in (3,4):
@@ -230,9 +233,10 @@ def home(r:Request):
   body=body.replace('<a class="btn secondary" href="/databases">Pilih database</a>','<a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/disconnect"><button>Putuskan Data Accurate</button></form>')
  else:
   body=body.replace('<a class="btn secondary" href="/databases">Pilih database</a>','').replace('<a class="btn" href="/oauth/start">Hubungkan Accurate</a>','')
-  if r.state.role=='viewer': body='<div class="metrics">'+stats+'</div>'
+  if r.state.role in ('viewer','exim'): body='<div class="metrics">'+stats+'</div>'
 
- body+='<section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Dokumen BC dibaca dari detail karakter transaksi. Saldo awal belum tervalidasi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
+ if r.state.role in ('admin','exim'): body+='<section><h2>Dokumen Kepabeanan</h2><a class="btn" href="/customs">Kelola Dokumen BC</a></section>'
+ body+='<section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Dokumen BC dikelola melalui menu Dokumen Kepabeanan. Saldo awal belum tervalidasi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
 
 # Professional interface and read-only transaction preview.
@@ -366,7 +370,7 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
       if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
       c.execute(text('INSERT INTO movements(ref,day,code,qty,kind) VALUES (:ref,:day,:code,:qty,:kind) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,kind=:kind'),row)
       if k in ('receive-item','delivery-order'):
-       c.execute(text('INSERT INTO bc(ref,doc_type,doc_no,doc_date) VALUES (:ref,:doc_type,:doc_no,NULL) ON CONFLICT(ref) DO UPDATE SET doc_type=:doc_type,doc_no=:doc_no'),row)
+       c.execute(text('INSERT INTO movement_meta(ref,number,party) VALUES (:ref,:number,:party) ON CONFLICT(ref) DO UPDATE SET number=:number,party=:party'),row)
        c.execute(text('INSERT INTO movement_cost(ref,value) VALUES (:ref,:value) ON CONFLICT(ref) DO UPDATE SET value=:value'),{'ref':row['ref'],'value':Decimal(row['value']) if row.get('value') is not None and engine.dialect.name=='postgresql' else row.get('value')})
      audit(c,'sync '+k+' '+str(len(rows)))
     results.append((MODULES[k],len(rows),'Disimpan/diperbarui; '+summary+('; KENDALA: '+'; '.join(issues[:30]) if issues else '') if rows else 'Tidak ada mutasi; '+summary))
@@ -438,7 +442,7 @@ def disconnect(r:Request):
 @app.get('/users',dependencies=[Depends(auth)])
 def users():
  with engine.connect() as c: rows=c.execute(text('SELECT username,role FROM app_users ORDER BY username')).fetchall()
- body='<section><p>Admin: akses penuh. Operator: sinkronisasi dan laporan tanpa pengaturan koneksi. Viewer: laporan saja.</p><form method="post" action="/users"><label>Username<input name="username" required maxlength="80"></label><label>Password baru<input name="password" type="password" required minlength="12"></label><label>Hak akses<select name="role"><option value="viewer">Viewer</option><option value="operator">Operator</option></select></label><button>Simpan pengguna</button></form><table><tr><th>User</th><th>Role</th><th>Aksi</th></tr>'
+ body='<section><p>Admin: akses penuh. Operator: sinkronisasi dan laporan tanpa pengaturan koneksi. Viewer: laporan saja.</p><form method="post" action="/users"><label>Username<input name="username" required maxlength="80"></label><label>Password baru<input name="password" type="password" required minlength="12"></label><label>Hak akses<select name="role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="exim">EXIM</option></select></label><button>Simpan pengguna</button></form><table><tr><th>User</th><th>Role</th><th>Aksi</th></tr>'
  for u,role in rows:
   e=html.escape(u,quote=True); body+='<tr><td>'+e+'</td><td>'+html.escape(role)+'</td><td><form method="post" action="/users/delete"><input type="hidden" name="username" value="'+e+'"><button>Hapus</button></form></td></tr>'
  return HTMLResponse(page('Hak Akses',body+'</table></section>'))
@@ -446,7 +450,7 @@ def users():
 def save_user(r:Request,username:str=Form(...),password:str=Form(...),role:str=Form(...)):
  guard(r)
  import re
- if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}',username) or username.lower()=='admin' or not 12<=len(password)<=256 or role not in ('viewer','operator'): raise HTTPException(400,'Data pengguna tidak valid')
+ if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}',username) or username.lower()=='admin' or not 12<=len(password)<=256 or role not in ('viewer','operator','exim'): raise HTTPException(400,'Data pengguna tidak valid')
  salt=secrets.token_hex(16)
  with engine.begin() as c:
   c.execute(text('INSERT INTO app_users VALUES (:u,:s,:d,:r) ON CONFLICT(username) DO UPDATE SET salt=:s,digest=:d,role=:r'),{'u':username,'s':salt,'d':password_hash(password,salt),'r':role}); audit(c,'save user '+username)
@@ -456,3 +460,47 @@ def delete_user(r:Request,username:str=Form(...)):
  guard(r)
  with engine.begin() as c: c.execute(text('DELETE FROM app_users WHERE username=:u'),{'u':username}); audit(c,'delete user '+username)
  return RedirectResponse('/users',303)
+
+with engine.begin() as c:
+ c.execute(text('CREATE TABLE IF NOT EXISTS movement_meta (ref VARCHAR(200) PRIMARY KEY, number TEXT, party TEXT)'))
+ c.execute(text('CREATE TABLE IF NOT EXISTS customs_audit (stamp TEXT, username TEXT, ref VARCHAR(200), old_data TEXT, new_data TEXT)'))
+
+@app.get('/customs',dependencies=[Depends(auth)])
+def customs(r:Request,start:date=None,end:date=None,q:str='',kind:str='',pending:bool=False):
+ esc=lambda x:html.escape(str(x if x is not None else ''),quote=True)
+ start=start or date.today().replace(day=1); end=end or date.today()
+ if start>end: raise HTTPException(400,'Periode tidak valid')
+ db=selected_db()
+ with engine.connect() as c:
+  rows=c.execute(text("SELECT m.ref,m.day,m.kind,m.code,i.name,i.unit,m.qty,mm.number,mm.party,b.doc_type,b.doc_no,b.doc_date FROM movements m JOIN items i ON i.code=m.code LEFT JOIN movement_meta mm ON mm.ref=m.ref LEFT JOIN bc b ON b.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.kind IN ('IN','OUT') AND m.ref LIKE :prefix ORDER BY m.day,m.ref"),{'a':str(start),'b':str(end),'prefix':f'AOL:{db}:%'}).fetchall()
+ rows=[x for x in rows if (not kind or x[2]==kind) and (not q or q.casefold() in ' '.join(str(v or '') for v in x).casefold()) and (not pending or not all(x[9:12]))]
+ body=f'<section><form class="actions"><label>Mulai<input type="date" name="start" value="{start}"></label><label>Sampai<input type="date" name="end" value="{end}"></label><label>Cari<input name="q" value="{esc(q)}"></label><label>Jenis transaksi<select name="kind"><option value="">Semua</option><option value="IN" {"selected" if kind=="IN" else ""}>Penerimaan</option><option value="OUT" {"selected" if kind=="OUT" else ""}>Pengiriman</option></select></label><label><input type="checkbox" name="pending" value="true" {"checked" if pending else ""}>Belum lengkap</label><button>Cari</button></form></section>'
+ body+=f'<section><h2>{len(rows)} baris barang</h2><p>Pilih satu atau beberapa baris, termasuk lintas transaksi. Data yang sudah lengkap tidak ditimpa kecuali diizinkan.</p><form method="post" action="/customs/save"><div class="actions"><label>Jenis BC<input name="doc_type" required maxlength="40" placeholder="BC 2.3"></label><label>Nomor BC<input type="text" name="doc_no" required maxlength="120"></label><label>Tanggal BC<input type="date" name="doc_date" required></label><label><input type="checkbox" name="overwrite" value="yes">Izinkan timpa data BC</label><button>Simpan pilihan</button></div><table><tr><th><input type="checkbox" aria-label="Pilih semua" onchange="document.querySelectorAll(` [name=ref] `.trim()).forEach(x=>x.checked=this.checked)"></th><th>Tanggal transaksi</th><th>Jenis transaksi</th><th>Nomor transaksi</th><th>Supplier / Customer</th><th>Kode</th><th>Barang</th><th>Qty</th><th>Satuan</th><th>Jenis BC</th><th>Nomor BC</th><th>Tanggal BC</th></tr>'
+ for x in rows:
+  ref,day,k,code,name,unit,qty,number,party,dt,dn,dd=x
+  vals=[day,'Penerimaan' if k=='IN' else 'Pengiriman',number or ref,party,code,name,format(abs(Decimal(str(qty))),',.2f').rstrip('0').rstrip('.'),unit,dt,dn,dd]
+  body+='<tr><td><input type="checkbox" name="ref" value="'+esc(ref)+'"></td>'+''.join('<td>'+esc(v)+'</td>' for v in vals)+'</tr>'
+ return page('Dokumen Kepabeanan',body+'</table></form></section><section><a href="/customs/audit">Riwayat perubahan</a></section>')
+
+@app.post('/customs/save',dependencies=[Depends(auth)])
+async def customs_save(r:Request):
+ import json
+ guard(r); f=await r.form(); refs=list(dict.fromkeys(f.getlist('ref'))); dt=str(f.get('doc_type','')).strip(); dn=str(f.get('doc_no','')).strip()
+ try: dd=date.fromisoformat(str(f.get('doc_date',''))).isoformat()
+ except ValueError: raise HTTPException(400,'Tanggal BC tidak valid')
+ if not refs or not dt or not dn or len(dt)>40 or len(dn)>120: raise HTTPException(400,'Pilih barang dan lengkapi dokumen BC')
+ with engine.begin() as c:
+  if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, movements, bc IN SHARE ROW EXCLUSIVE MODE'))
+  db=c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()
+  for ref in refs:
+   if not db or not ref.startswith(f'AOL:{db}:') or not c.execute(text("SELECT ref FROM movements WHERE ref=:r AND kind IN ('IN','OUT')"),{'r':ref}).scalar(): raise HTTPException(400,'Referensi transaksi tidak valid')
+   old=c.execute(text('SELECT doc_type,doc_no,doc_date FROM bc WHERE ref=:r'),{'r':ref}).fetchone()
+   if old and any(old) and f.get('overwrite')!='yes': raise HTTPException(409,'Ada data BC terisi. Tidak ada perubahan disimpan; pilih baris kosong atau izinkan timpa.')
+   c.execute(text('INSERT INTO bc VALUES (:r,:t,:n,:d) ON CONFLICT(ref) DO UPDATE SET doc_type=:t,doc_no=:n,doc_date=:d'),{'r':ref,'t':dt,'n':dn,'d':dd})
+   c.execute(text('INSERT INTO customs_audit VALUES (:s,:u,:r,:o,:n)'),{'s':datetime.utcnow().isoformat()+'Z','u':r.state.username,'r':ref,'o':json.dumps(list(old) if old else None),'n':json.dumps([dt,dn,dd])})
+ return HTMLResponse(page('Dokumen BC tersimpan',f'<section>{len(refs)} baris diperbarui. <a href="/customs">Kembali</a></section>'))
+
+@app.get('/customs/audit',dependencies=[Depends(auth)])
+def customs_audit():
+ with engine.connect() as c: rows=c.execute(text('SELECT * FROM customs_audit ORDER BY stamp DESC LIMIT 500')).fetchall()
+ return page('Riwayat Dokumen BC','<section><table><tr><th>Waktu UTC</th><th>Pengguna</th><th>Referensi</th><th>Sebelum</th><th>Sesudah</th></tr>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</table></section>')
