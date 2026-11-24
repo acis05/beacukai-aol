@@ -1,3 +1,7 @@
+## v3.4
+- Perbaikan respons HTML halaman Dokumen Kepabeanan dan Riwayat Dokumen BC.
+- Branding AOLINX Bea Cukai Reports. Tidak ada migrasi database atau perubahan OAuth.
+
 # v3.2
 Selisih = saldo akhir - hasil opname; kosong bila opname tidak tersedia. Admin bawaan tetap memakai ADMIN_PASSWORD. Kelola pengguna di /users (operator atau viewer). Hak akses diperiksa server; hanya admin dapat memilih database, menghubungkan atau memutuskan koneksi. Putuskan menghapus token lokal, mempertahankan database terpilih dan data laporan; tidak mencabut izin di Accurate. Sinkron ulang penerimaan/pengiriman untuk membaca charField1 (jenis BC) dan charField2 (nomor BC). Tanggal BC belum dipetakan. Uji API live masih diperlukan.
 

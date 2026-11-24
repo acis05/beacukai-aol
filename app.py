@@ -21,7 +21,7 @@ if len(session_secret)<32 or session_secret.startswith(('change-me','ISI_','GANT
  raise RuntimeError('SESSION_SECRET wajib acak, minimal 32 karakter; lihat RAILWAY.md')
 key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'it-inventory/oauth-storage/v1').derive(session_secret.encode())
 fernet=Fernet(base64.urlsafe_b64encode(key))
-app=FastAPI(); basic=HTTPBasic()
+app=FastAPI(title="AOLINX Bea Cukai Reports"); basic=HTTPBasic()
 app.add_middleware(SessionMiddleware,secret_key=session_secret,https_only=os.getenv('HTTPS_ONLY')=='true')
 db_url=os.getenv('DATABASE_URL','sqlite:///inventory.db')
 if db_url.startswith(('postgres://','postgresql://')):
@@ -465,7 +465,7 @@ with engine.begin() as c:
  c.execute(text('CREATE TABLE IF NOT EXISTS movement_meta (ref VARCHAR(200) PRIMARY KEY, number TEXT, party TEXT)'))
  c.execute(text('CREATE TABLE IF NOT EXISTS customs_audit (stamp TEXT, username TEXT, ref VARCHAR(200), old_data TEXT, new_data TEXT)'))
 
-@app.get('/customs',dependencies=[Depends(auth)])
+@app.get('/customs',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def customs(r:Request,start:date=None,end:date=None,q:str='',kind:str='',pending:bool=False):
  esc=lambda x:html.escape(str(x if x is not None else ''),quote=True)
  start=start or date.today().replace(day=1); end=end or date.today()
@@ -500,7 +500,7 @@ async def customs_save(r:Request):
    c.execute(text('INSERT INTO customs_audit VALUES (:s,:u,:r,:o,:n)'),{'s':datetime.utcnow().isoformat()+'Z','u':r.state.username,'r':ref,'o':json.dumps(list(old) if old else None),'n':json.dumps([dt,dn,dd])})
  return HTMLResponse(page('Dokumen BC tersimpan',f'<section>{len(refs)} baris diperbarui. <a href="/customs">Kembali</a></section>'))
 
-@app.get('/customs/audit',dependencies=[Depends(auth)])
+@app.get('/customs/audit',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def customs_audit():
  with engine.connect() as c: rows=c.execute(text('SELECT * FROM customs_audit ORDER BY stamp DESC LIMIT 500')).fetchall()
  return page('Riwayat Dokumen BC','<section><table><tr><th>Waktu UTC</th><th>Pengguna</th><th>Referensi</th><th>Sebelum</th><th>Sesudah</th></tr>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</table></section>')

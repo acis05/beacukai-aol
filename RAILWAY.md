@@ -1,4 +1,4 @@
-# Deploy IT Inventory ke Railway
+# Deploy AOLINX Bea Cukai Reports ke Railway
 Versi MVP untuk uji internal, bukan sistem yang sudah tervalidasi Bea Cukai.
 1. Ekstrak ZIP. Buat repository GitHub private. Upload seluruh isi ZIP ke root repository (termasuk file tersembunyi), commit. Jangan upload .env.
 2. Railway: New Project, Deploy from GitHub repo. Pilih repository. Tambahkan PostgreSQL pada project yang sama. Nama service database diasumsikan Postgres.
