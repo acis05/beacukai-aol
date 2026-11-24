@@ -281,12 +281,12 @@ def health():
 from sync_inventory import collect, MODULES as SYNC_MODULES
 
 def sync_panel():
- return '<section id="sinkron"><h2>Sinkronisasi transaksi Accurate</h2><p class="notice">Mode draft: penerimaan/pengiriman diasumsikan mutasi eksternal; validasi kepabeanan tetap diperlukan. Penyesuaian belum diposting otomatis. Jangan sinkronkan periode yang sudah diimport manual.</p><form method="post" action="/sync/transactions"><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><label>Modul<select name="module"><option value="all">Semua transaksi</option>'+''.join('<option value="'+k+'">'+MODULES[k]+'</option>' for k in SYNC_MODULES)+'</select></label><label><input type="checkbox" name="confirm" value="yes" required> Saya sudah memeriksa klasifikasi, satuan, dan tidak ada duplikasi import manual.</label><button>Sinkronisasi transaksi</button></form></section>'
+ return '<section id="sinkron"><h2>Sinkronisasi transaksi Accurate</h2><p class="notice">Mode draft: penerimaan/pengiriman diasumsikan mutasi eksternal; validasi kepabeanan tetap diperlukan. Penyesuaian belum diposting otomatis. Jangan sinkronkan periode yang sudah diimport manual.</p><form id="batch-sync" method="post" action="/sync/transactions"><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><label>Modul<select name="module"><option value="all">Semua transaksi</option>'+''.join('<option value="'+k+'">'+MODULES[k]+'</option>' for k in SYNC_MODULES)+'</select></label><label><input type="checkbox" name="confirm" value="yes" required> Saya sudah memeriksa klasifikasi, satuan, dan tidak ada duplikasi import manual.</label><button>Sinkronisasi transaksi</button></form><p id="batch-status" role="status"></p><div id="batch-results"></div></section>' + BATCH_SCRIPT
 
 @app.post('/sync/transactions',dependencies=[Depends(auth)])
-def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:str=Form(...),confirm:str=Form(...)):
+def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:str=Form(...),confirm:str=Form('')):
  guard(r)
- if start>end or (end-start).days>31 or confirm!='yes' or module not in (*SYNC_MODULES,'all'): raise HTTPException(400,'Periode maksimum 32 hari dan konfirmasi wajib')
+ if start>end or confirm!='yes' or module not in (*SYNC_MODULES,'all'): return HTMLResponse(page('Periksa sinkronisasi','<section><p class="notice">Tanggal mulai harus sebelum atau sama dengan tanggal akhir, modul valid dan konfirmasi wajib dicentang.</p><a href="/#sinkron">Kembali</a></section>'),status_code=400)
  db_id=selected_db()
  if not db_id: raise HTTPException(409,'Pilih database dahulu')
  esc=lambda x:html.escape(str(x))
@@ -319,3 +319,20 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
    except Exception as e: results.append((MODULES[k],0,'Gagal: '+(str(e) if isinstance(e,ValueError) else type(e).__name__)))
  except Exception as e: results.append(('Koneksi',0,type(e).__name__))
  return HTMLResponse(page('Hasil sinkronisasi','<section><p class="notice">Draft. Periksa semua kendala sebelum menggunakan laporan.</p><table><tr><th>Modul</th><th>Baris</th><th>Status</th></tr>'+''.join('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in x)+'</tr>' for x in results)+'</table><a class="btn" href="/#laporan">Buka laporan</a></section>'),headers={'Cache-Control':'no-store'})
+
+BATCH_SCRIPT = """<script>
+(()=>{const f=document.getElementById('batch-sync'); if(!f)return;
+f.addEventListener('submit',async e=>{e.preventDefault();if(!f.reportValidity())return;
+const data=new FormData(f), a=new Date(data.get('start')+'T00:00:00Z'), b=new Date(data.get('end')+'T00:00:00Z'), day=86400000;
+const status=document.getElementById('batch-status'), out=document.getElementById('batch-results'), btn=f.querySelector('button');
+if(a>b){status.textContent='Tanggal mulai melebihi tanggal akhir.';return;}
+const mods=data.get('module')==='all'?Array.from(f.elements.module.options).map(x=>x.value).filter(x=>x!=='all'):[data.get('module')];
+const total=Math.ceil((Math.round((b-a)/day)+1)/7)*mods.length;let done=0, failed=0;btn.disabled=true;out.replaceChildren();
+const iso=x=>new Date(x).toISOString().slice(0,10);
+try{for(let t=+a;t<=+b;t+=7*day){const end=Math.min(t+6*day,+b);for(const m of mods){
+const label=iso(t)+' – '+iso(end)+' / '+m;status.textContent='Memproses '+(done+1)+'/'+total+' '+label+' — jangan tutup halaman.';
+const payload=new FormData();for(const [k,v] of data)payload.set(k,v);payload.set('start',iso(t));payload.set('end',iso(end));payload.set('module',m);
+const section=document.createElement('section'), heading=document.createElement('h3');heading.textContent=label;section.append(heading);out.append(section);
+try{const res=await fetch(f.action,{method:'POST',body:payload,credentials:'same-origin'});const doc=new DOMParser().parseFromString(await res.text(),'text/html');const table=doc.querySelector('main table');if(!res.ok||!table)throw Error('HTTP '+res.status+' / hasil tidak tersedia');section.append(document.importNode(table,true));if(!table.textContent.includes('Disimpan/diperbarui'))failed++;}catch(err){failed++;const p=document.createElement('p');p.textContent='Batch gagal atau status tidak diketahui: '+err.message;section.append(p);}
+done++;}}status.textContent='Selesai '+done+'/'+total+' batch; '+failed+' bermasalah. Periksa hasil sebelum membuka laporan.';}finally{btn.disabled=false;}
+});})();</script>"""

@@ -7,7 +7,8 @@ def day_of(v):
  except ValueError: return datetime.strptime(str(v),'%d/%m/%Y').date()
 def collect(get,module,start,end,db_id,masters):
  rows=[]; issues=[]; seen=set()
- for p in range(1,101):
+ p=1
+ while True:
   data=get(module+'/list.do',{'sp.page':p,'sp.pageSize':20,'filter.transDate.op':'BETWEEN','filter.transDate.val[0]':start.strftime('%d/%m/%Y'),'filter.transDate.val[1]':end.strftime('%d/%m/%Y')})
   entries=data['d']; count=int(data['sp']['pageCount'])
   if not isinstance(entries,list) or (not entries and p<count): raise PreviewError('Pagination tidak valid')
@@ -35,4 +36,4 @@ def collect(get,module,start,end,db_id,masters):
     rows.extend(batch)
    except Exception as exc: issues.append(f'{rid}: '+(str(exc) if isinstance(exc,(ValueError,PreviewError)) else type(exc).__name__))
   if p>=count: return rows,issues
- raise PreviewError('Lebih dari 100 halaman; perkecil periode')
+  p+=1
