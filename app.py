@@ -122,7 +122,7 @@ CATS=['BB','BP','FG','WIP','ASET','SCRAP']; KINDS=['IN','OUT','PROD','TRANSFER',
 HEADERS={'items':['code','name','category','unit'],'movements':['ref','day','code','qty','kind'],'bc':['ref','doc_type','doc_no','doc_date']}
 @app.get('/template/{table}',dependencies=[Depends(auth)])
 def template(table:str):
- if table != 'bc': raise HTTPException(404)
+ raise HTTPException(410,'Import Excel dinonaktifkan pada mode uji tanpa dokumen BC')
  return excel(HEADERS[table],[],table)
 def excel(headers,rows,name):
  w=Workbook(); s=w.active; s.append(headers)
@@ -135,7 +135,7 @@ def excel(headers,rows,name):
 def upload(r:Request,table:str,file:UploadFile=File(...)):
  guard(r)
  if not selected_db(): raise HTTPException(409,'Pilih database Accurate sebelum import')
- if table != 'bc': raise HTTPException(404)
+ raise HTTPException(410,'Import Excel dinonaktifkan pada mode uji tanpa dokumen BC')
  try:
   raw=file.file.read(5_000_001)
   if len(raw)>5_000_000: raise ValueError('File terlalu besar')
@@ -173,21 +173,27 @@ def report(n,start,end):
 @app.get('/report/{n}',dependencies=[Depends(auth)])
 def view(n:int,start:date,end:date,download:bool=False):
  h,rows=report(n,start,end)
+ with engine.connect() as c:
+  diag=c.execute(text("SELECT kind,COUNT(*) FROM movements WHERE day BETWEEN :a AND :b GROUP BY kind ORDER BY kind"),{'a':start.isoformat(),'b':end.isoformat()}).fetchall()
+  total=c.execute(text('SELECT COUNT(*) FROM movements')).scalar()
+  unknown=c.execute(text("SELECT COUNT(*) FROM items WHERE category IS NULL OR category=''")).scalar()
+ diagnostic='Total mutasi lokal: '+str(total)+'; periode: '+(', '.join(str(k)+': '+str(v) for k,v in diag) or '0 mutasi')+'; barang belum diklasifikasi: '+str(unknown)+'; baris laporan: '+str(len(rows))
  if download:return excel(h,rows,'laporan_'+str(n))
- esc=lambda x:html.escape(str(x if x is not None else 'BELUM LENGKAP'))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p>'+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ esc=lambda x:html.escape(str(x if x is not None else ''))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji tanpa dokumen BC — belum tervalidasi</p><p>'+esc(diagnostic)+'</p><a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
  with engine.connect() as c:
-  counts=[c.execute(text('SELECT COUNT(*) FROM '+t)).scalar() for t in ('items','movements','bc')]
+  counts=[c.execute(text('SELECT COUNT(*) FROM '+t)).scalar() for t in ('items','movements')]
+  counts.append(c.execute(text("SELECT COUNT(*) FROM items WHERE category IS NULL OR category=''")).scalar())
   connected=bool(c.execute(text("SELECT v FROM settings WHERE k='token'")).scalar())
  db=selected_db()
  esc=lambda x:html.escape(str(x))
- stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Dokumen BC'],counts))
+ stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Barang belum diklasifikasi'],counts))
  body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
  body+='<section><a class="btn" href="/stock-history">Preview histori stok 7 hari</a></section>'+sync_panel()
  body+=scope_panel()
- body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in [('bc','Dokumen BC')])+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Saldo awal dan dokumen BC tetap perlu dilengkapi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
+ body+='<section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Dokumen BC tidak wajib untuk uji laporan. Saldo awal belum tervalidasi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
 
 # Professional interface and read-only transaction preview.
