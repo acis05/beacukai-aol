@@ -1,3 +1,8 @@
-# v2.5.1 – Batch Synchronization
-Backup PostgreSQL, upload seluruh isi ZIP ke GitHub, deploy Railway. Variables tetap.
-Pilih periode bebas, centang konfirmasi. Browser memproses setiap modul per 7 hari secara berurutan; jangan tutup halaman. Tidak ada batas 32 hari atau 100 halaman transaksi. Batch gagal ditampilkan; ulangi periode yang gagal setelah perbaikan. ID API tetap menggunakan upsert. Validasi lama tetap berlaku per batch, termasuk penyesuaian ambigu dan mutasi manual. Batch yang gagal tidak disimpan; laporan dapat belum lengkap. Batas timeout jaringan/API masih berlaku. Belum diuji langsung Railway/Accurate.
+# v2.6
+- Penerimaan memakai quantity/quantityDefault sesuai satuan master, bukan availableQuantity.
+- Pemasukan tidak mensyaratkan kategori barang, tetapi kode dan satuan master tetap wajib.
+- Hasil sinkron menampilkan jumlah transaksi API, detail dan transaksi di luar periode; batch kosong tidak disebut berhasil menyimpan.
+- Uji lokal menggunakan dua detail penerimaan yang diberikan pengguna: empat baris mutasi. API list disimulasikan; belum diuji di Railway.
+- Pertahankan PostgreSQL, SESSION_SECRET dan konfigurasi OAuth. Backup sebelum deploy. Upload seluruh isi ZIP ke GitHub.
+- Sinkron Penerimaan Barang 01/11/2026–24/11/2026, kemudian buka laporan Pemasukan pada periode yang sama. Pastikan satuan master PCS, KG, Ltr sesuai kode.
+- Modul lain tetap draft; arah penyesuaian belum tervalidasi. Dokumen BC dan saldo awal tetap perlu dilengkapi.

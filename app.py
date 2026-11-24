@@ -170,7 +170,7 @@ def view(n:int,start:date,end:date,download:bool=False):
  h,rows=report(n,start,end)
  if download:return excel(h,rows,'laporan_'+str(n))
  esc=lambda x:html.escape(str(x if x is not None else 'BELUM LENGKAP'))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p>'+('<p class="notice">Tidak ada baris sesuai periode/kategori. Sinkronkan transaksi dan lengkapi klasifikasi barang terlebih dahulu.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p>'+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
  with engine.connect() as c:
@@ -299,8 +299,9 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
   for k in SYNC_MODULES if module=='all' else (module,):
    try:
     with engine.connect() as c: masters={x[0]:(x[1],x[2]) for x in c.execute(text('SELECT code,unit,category FROM items'))}
-    rows,issues=collect(get,k,start,end,db_id,masters)
-    if issues: results.append((MODULES[k],0,'Tidak disimpan: '+ '; '.join(issues[:30]))); continue
+    rows,issues,stats=collect(get,k,start,end,db_id,masters)
+    summary=f"API: {stats['listed']} transaksi, {stats['details']} detail, {stats['outside']} di luar periode"
+    if issues: results.append((MODULES[k],0,summary+'; Tidak disimpan: '+ '; '.join(issues[:30]))); continue
     with engine.begin() as c:
      if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items, movements, bc IN SHARE ROW EXCLUSIVE MODE'))
      if c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()!=db_id: raise ValueError('Database berubah')
@@ -315,7 +316,7 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
       if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
       c.execute(text('INSERT INTO movements(ref,day,code,qty,kind) VALUES (:ref,:day,:code,:qty,:kind) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,kind=:kind'),row)
      audit(c,'sync '+k+' '+str(len(rows)))
-    results.append((MODULES[k],len(rows),'Disimpan/diperbarui'))
+    results.append((MODULES[k],len(rows),'Disimpan/diperbarui; '+summary if rows else 'Tidak ada mutasi; '+summary))
    except Exception as e: results.append((MODULES[k],0,'Gagal: '+(str(e) if isinstance(e,ValueError) else type(e).__name__)))
  except Exception as e: results.append(('Koneksi',0,type(e).__name__))
  return HTMLResponse(page('Hasil sinkronisasi','<section><p class="notice">Draft. Periksa semua kendala sebelum menggunakan laporan.</p><table><tr><th>Modul</th><th>Baris</th><th>Status</th></tr>'+''.join('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in x)+'</tr>' for x in results)+'</table><a class="btn" href="/#laporan">Buka laporan</a></section>'),headers={'Cache-Control':'no-store'})
@@ -333,6 +334,6 @@ try{for(let t=+a;t<=+b;t+=7*day){const end=Math.min(t+6*day,+b);for(const m of m
 const label=iso(t)+' – '+iso(end)+' / '+m;status.textContent='Memproses '+(done+1)+'/'+total+' '+label+' — jangan tutup halaman.';
 const payload=new FormData();for(const [k,v] of data)payload.set(k,v);payload.set('start',iso(t));payload.set('end',iso(end));payload.set('module',m);
 const section=document.createElement('section'), heading=document.createElement('h3');heading.textContent=label;section.append(heading);out.append(section);
-try{const res=await fetch(f.action,{method:'POST',body:payload,credentials:'same-origin'});const doc=new DOMParser().parseFromString(await res.text(),'text/html');const table=doc.querySelector('main table');if(!res.ok||!table)throw Error('HTTP '+res.status+' / hasil tidak tersedia');section.append(document.importNode(table,true));if(!table.textContent.includes('Disimpan/diperbarui'))failed++;}catch(err){failed++;const p=document.createElement('p');p.textContent='Batch gagal atau status tidak diketahui: '+err.message;section.append(p);}
+try{const res=await fetch(f.action,{method:'POST',body:payload,credentials:'same-origin'});const doc=new DOMParser().parseFromString(await res.text(),'text/html');const table=doc.querySelector('main table');if(!res.ok||!table)throw Error('HTTP '+res.status+' / hasil tidak tersedia');section.append(document.importNode(table,true));if(!table.textContent.includes('Disimpan/diperbarui')&&!table.textContent.includes('Tidak ada mutasi;'))failed++;}catch(err){failed++;const p=document.createElement('p');p.textContent='Batch gagal atau status tidak diketahui: '+err.message;section.append(p);}
 done++;}}status.textContent='Selesai '+done+'/'+total+' batch; '+failed+' bermasalah. Periksa hasil sebelum membuka laporan.';}finally{btn.disabled=false;}
 });})();</script>"""
