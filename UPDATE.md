@@ -3,3 +3,6 @@ Backup PostgreSQL, replace all repository files, redeploy. Keep SESSION_SECRET a
 
 ## v2.8
 Mode uji tanpa impor BC; endpoint impor dinonaktifkan, data lama dipertahankan. Laporan sudah memakai LEFT JOIN BC. Diagnostik jumlah mutasi dan kategori ditambahkan. Sinkronisasi tetap diperlukan.
+
+## v2.9
+Filter satu hari EQUAL; fallback daftar tanpa filter jika kosong; opsi diagnostik tanpa filter, tanggal detail disaring lokal. Scan penuh dapat lambat pada database besar. Uji mock saja, belum API live.

@@ -7,11 +7,17 @@ MODULES=('receive-item','delivery-order','job-order','roll-over','item-adjustmen
 def day_of(v):
  try: return date.fromisoformat(str(v)[:10])
  except ValueError: return datetime.strptime(str(v),'%d/%m/%Y').date()
-def collect(get,module,start,end,db_id,masters):
- rows=[]; issues=[]; seen=set(); stats={"listed":0,"outside":0,"details":0}
+def collect(get,module,start,end,db_id,masters,unfiltered=False):
+ rows=[]; issues=[]; seen=set(); stats={"listed":0,"outside":0,"details":0,"mode":"tanpa filter API" if unfiltered else "filter API"}
  p=1
  while True:
-  data=get(module+'/list.do',{'sp.page':p,'sp.pageSize':20,'filter.transDate.op':'BETWEEN','filter.transDate.val[0]':start.strftime('%d/%m/%Y'),'filter.transDate.val[1]':end.strftime('%d/%m/%Y')})
+  params={'sp.page':p,'sp.pageSize':20}
+  if not unfiltered:
+   if start==end: params.update({'filter.transDate.op':'EQUAL','filter.transDate.val':start.strftime('%d/%m/%Y')})
+   else: params.update({'filter.transDate.op':'BETWEEN','filter.transDate.val[0]':start.strftime('%d/%m/%Y'),'filter.transDate.val[1]':end.strftime('%d/%m/%Y')})
+  data=get(module+'/list.do',params)
+  if p==1 and not unfiltered and data.get('d')==[]:
+   unfiltered=True; stats['mode']='fallback tanpa filter API'; continue
   entries=data['d']; count=int(data['sp']['pageCount'])
   if not isinstance(entries,list) or (not entries and p<count): raise PreviewError('Pagination tidak valid')
   for e in entries:
