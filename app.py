@@ -1,4 +1,7 @@
-import os, secrets, io, time, html
+import os, secrets, io, time, html, base64
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.fernet import InvalidToken
 from datetime import date
 from decimal import Decimal
 from urllib.parse import urlencode, urlparse
@@ -12,17 +15,20 @@ from sqlalchemy import create_engine, text
 from openpyxl import load_workbook, Workbook
 from cryptography.fernet import Fernet
 load_dotenv()
+session_secret=os.getenv('SESSION_SECRET','')
+if len(session_secret)<32 or session_secret.startswith(('change-me','ISI_','GANTI_')):
+ raise RuntimeError('SESSION_SECRET wajib acak, minimal 32 karakter; lihat RAILWAY.md')
+key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'it-inventory/oauth-storage/v1').derive(session_secret.encode())
+fernet=Fernet(base64.urlsafe_b64encode(key))
 app=FastAPI(); basic=HTTPBasic()
-app.add_middleware(SessionMiddleware,secret_key=os.getenv('SESSION_SECRET') or secrets.token_hex(32),https_only=os.getenv('HTTPS_ONLY')=='true')
+app.add_middleware(SessionMiddleware,secret_key=session_secret,https_only=os.getenv('HTTPS_ONLY')=='true')
 db_url=os.getenv('DATABASE_URL','sqlite:///inventory.db')
 if db_url.startswith(('postgres://','postgresql://')):
  db_url='postgresql+psycopg://'+db_url.split('://',1)[1]
 if os.getenv('RAILWAY_ENVIRONMENT'):
- for key in ('DATABASE_URL','ADMIN_PASSWORD','SESSION_SECRET','TOKEN_KEY'):
+ for key in ('DATABASE_URL','ADMIN_PASSWORD','SESSION_SECRET'):
   if not os.getenv(key) or os.getenv(key).startswith('change-me'): raise RuntimeError('Missing secure variable: '+key)
  if not db_url.startswith('postgresql+psycopg://'): raise RuntimeError('PostgreSQL required on Railway')
- try: Fernet(os.environ['TOKEN_KEY'])
- except ValueError as e: raise RuntimeError("TOKEN_KEY tidak valid: gunakan Fernet.generate_key(), bukan placeholder") from e
 engine=create_engine(db_url,pool_pre_ping=True)
 with engine.begin() as c:
  for sql in ['CREATE TABLE IF NOT EXISTS items (code VARCHAR(100) PRIMARY KEY, name TEXT NOT NULL, category VARCHAR(30), unit VARCHAR(30))','CREATE TABLE IF NOT EXISTS movements (ref VARCHAR(200) PRIMARY KEY, day VARCHAR(10), code VARCHAR(100) REFERENCES items(code), qty NUMERIC(24,6), kind VARCHAR(20))','CREATE TABLE IF NOT EXISTS bc (ref VARCHAR(200) PRIMARY KEY, doc_type TEXT, doc_no TEXT, doc_date VARCHAR(10))','CREATE TABLE IF NOT EXISTS settings (k VARCHAR(50) PRIMARY KEY, v TEXT)','CREATE TABLE IF NOT EXISTS audit (event TEXT, stamp VARCHAR(40))']:
@@ -35,7 +41,7 @@ def guard(r:Request):
 def audit(c,event): c.execute(text('INSERT INTO audit VALUES (:e,:t)'),{'e':event,'t':str(time.time())})
 def save_token(d):
  import json
- d['expires_at']=time.time()+d['expires_in']; v=Fernet(os.environ['TOKEN_KEY']).encrypt(json.dumps(d).encode()).decode()
+ d['expires_at']=time.time()+d['expires_in']; v=fernet.encrypt(json.dumps(d).encode()).decode()
  with engine.begin() as c: c.execute(text("INSERT INTO settings VALUES ('token',:v) ON CONFLICT(k) DO UPDATE SET v=:v"),{'v':v})
 def token_request(data):
  r=httpx.post('https://account.accurate.id/oauth/token',data=data,auth=(os.environ['ACCURATE_CLIENT_ID'],os.environ['ACCURATE_CLIENT_SECRET']),timeout=30); r.raise_for_status(); return r.json()
@@ -43,7 +49,8 @@ def token():
  import json
  with engine.connect() as c: v=c.execute(text("SELECT v FROM settings WHERE k='token'")).scalar()
  if not v: raise HTTPException(409,'Hubungkan Accurate dahulu')
- d=json.loads(Fernet(os.environ['TOKEN_KEY']).decrypt(v.encode()))
+ try: d=json.loads(fernet.decrypt(v.encode()))
+ except InvalidToken: raise HTTPException(409,'Token lama tidak dapat dibaca. Hubungkan Accurate kembali melalui halaman utama.')
  if d['expires_at']<time.time()+60:
   new=token_request({'grant_type':'refresh_token','refresh_token':d['refresh_token']}); new.setdefault('refresh_token',d['refresh_token']); save_token(new); d=new
  return d['access_token']

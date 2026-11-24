@@ -1,3 +1,2 @@
-# Update 1.1
-Ganti file repository dengan isi ZIP. Hapus ACCURATE_DB_ID dari Railway. TOKEN_KEY tetap wajib valid dan stabil. Jika belum pernah menyimpan token, buat dengan `python -c "import secrets,base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`. Jangan mengganti kunci lama jika sudah menyimpan token.
-Satu instalasi untuk satu perusahaan; pilihan database disimpan di PostgreSQL. Jika data lama sudah ada tanpa pilihan database, pemilihan ditolak untuk mencegah pencampuran; perlu migrasi terverifikasi atau instalasi baru. Tidak mendukung SaaS multi-tenant. API live belum diuji.
+# Update 1.2 — OAuth
+Ganti file repository dengan isi ZIP. Hapus TOKEN_KEY dan ACCURATE_DB_ID dari Railway. SESSION_SECRET wajib acak minimal 32 karakter; buat dengan `python -c "import secrets; print(secrets.token_hex(32))"`. Pertahankan secret setelah deployment. Token versi lama tidak dimigrasikan; hubungkan Accurate kembali setelah update. Data transaksi dan pilihan database tetap tersimpan di PostgreSQL. Backup sebelum update. Satu instalasi per perusahaan. Sinkronisasi transaksi otomatis dan validasi laporan belum selesai.
