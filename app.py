@@ -170,7 +170,7 @@ def view(n:int,start:date,end:date,download:bool=False):
  h,rows=report(n,start,end)
  if download:return excel(h,rows,'laporan_'+str(n))
  esc=lambda x:html.escape(str(x if x is not None else 'BELUM LENGKAP'))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p><a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p>'+('<p class="notice">Tidak ada baris sesuai periode/kategori. Import mutasi dan klasifikasi barang terlebih dahulu.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
  with engine.connect() as c:
@@ -181,7 +181,7 @@ def home():
  stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Dokumen BC'],counts))
  body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
  body+=scope_panel()
- body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in zip(HEADERS,['Klasifikasi barang','Mutasi persediaan','Dokumen BC']))+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal, bukan hasil preview API.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
+ body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in zip(HEADERS,['Klasifikasi barang','Mutasi persediaan','Dokumen BC']))+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Unduh draft dari preview, validasi qty dan jenis mutasi, lalu import Excel.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
 
 # Professional interface and read-only transaction preview.
@@ -193,7 +193,7 @@ def preview_form(k,v):
  return f'<form method="get" action="/sync/preview/{k}" class="report"><b>{v}</b>{dates}<label>Halaman<input type="number" name="page_no" min="1" value="1" required></label><button class="secondary">Baca data</button></form>'
 
 @app.get('/sync/preview/{module}', dependencies=[Depends(auth)])
-def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1):
+def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1,download:bool=False):
  import json, logging
  from accurate_read import PreviewError
  if module not in MODULES: raise HTTPException(404)
@@ -231,13 +231,41 @@ def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1):
  except Exception as e:
   logging.getLogger('uvicorn.error').warning('Preview %s stage=%s type=%s',module,stage,type(e).__name__)
   return fail(stage+': '+type(e).__name__+'. Periksa log Railway.')
- rows=[]
+ rows=[]; candidates=[]
  for record in records:
-  if module=='item-adjustment': continue
-  try: rows.extend(normalize(module,record,issues))
+  try:
+   mapped=normalize(module,record,issues); rows.extend(mapped)
+   if module!='item' and mapped:
+    # Only export stable detail IDs; never guess direction or customs classification.
+    for line in record.get('detailItem',[]):
+     if not isinstance(line,dict) or line.get('id') is None or record.get('id') is None: continue
+     single=dict(record,detailItem=[line]); one=normalize(module,single,[])
+     if not one: continue
+     v=one[0]
+     try:
+      day=str(v[1]); day=date.fromisoformat(day[:10]).isoformat() if '-' in day[:10] else datetime.strptime(day,'%d/%m/%Y').date().isoformat()
+     except ValueError: continue
+     ref=f"AOL:{db_id}:{module}:{record['id']}:{line['id']}"
+     if len(ref)>200: continue
+     candidates.append((ref,day,v[2],None,None,v[4],v[5],v[0]))
   except Exception as e: issues.append('Mapping transaksi '+str(record.get('id','?'))+': '+(str(e) if isinstance(e,PreviewError) else type(e).__name__))
+ if download:
+  if module=='item': raise HTTPException(400,'Gunakan sinkron master barang')
+  w=Workbook(); sheet=w.active; sheet.title='Mutasi'; sheet.append(HEADERS['movements']); info=w.create_sheet('Referensi review'); info.append(['ref','day','code','qty API (belum bertanda)','satuan API','nomor transaksi']);
+  for ref,day,code,qty,kind,raw,unit,num in candidates:
+   sheet.append([ref,day,code,qty,kind]); info.append([ref,day,code,str(raw),unit,num])
+  for ws in w:
+   for rr in ws.iter_rows():
+    for cell in rr:
+     if isinstance(cell.value,str): cell.data_type='s'
+  b=io.BytesIO(); w.save(b); b.seek(0); return StreamingResponse(b,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':'attachment; filename=review_mutasi.xlsx','Cache-Control':'no-store'})
  headers=['Nomor','Tanggal','Kode','Nama','Qty','Satuan','Gudang','Referensi pekerjaan','Tipe']
  body='<section><p class="notice">Preview saja; tidak mengubah Accurate atau buku mutasi. Detail berhasil: '+str(len(records))+'; kendala: '+str(len(issues))+'</p><a class="btn secondary" href="/#integrasi">Kembali</a>'
+ if records and not rows: body+='<p class="notice">Detail tersedia tetapi tidak ada baris barang yang dapat dipetakan. Periksa struktur JSON di bawah; jangan anggap stok nol.</p>'
+ if module=='item-adjustment': body+='<p>Qty API ditampilkan apa adanya, belum menentukan arah penyesuaian.</p>'
+ if candidates:
+  query=urlencode({'start':start or '', 'end':end or '', 'page_no':page_no,'download':'true'})
+  body+='<p><a class="btn" href="?'+esc(query)+'">Unduh draft mutasi untuk review</a></p><p>Isi qty bertanda dalam satuan master dan kind pada Excel, lalu import Mutasi persediaan. Hanya baris dengan ID detail stabil disertakan: '+str(len(candidates))+' dari '+str(len(rows))+'. Jangan import ulang transaksi yang sudah dicatat dengan referensi lain.</p>'
  if issues: body+='<ul>'+''.join('<li>'+esc(x)+'</li>' for x in issues)+'</ul>'
  if not records and not issues: body+='<p>Tidak ada transaksi pada halaman/periode ini.</p>'
  if rows: body+='<div class="table-wrap"><table><thead><tr>'+''.join('<th>'+x+'</th>' for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in row)+'</tr>' for row in rows)+'</tbody></table></div>'
