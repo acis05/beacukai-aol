@@ -59,7 +59,7 @@ def collect(get,module,start,end,db_id,masters,unfiltered=False):
        cost=Decimal(str(line['itemCost']))
        if cost.is_finite() and cost>=0: value=str(q*cost)
       except Exception: pass
-     batch.append(dict(ref=ref,day=day.isoformat(),code=code,qty=str(q*sign),kind=kind,value=value))
+     batch.append(dict(ref=ref,day=day.isoformat(),code=code,qty=str(q*sign),kind=kind,value=value,doc_type=str(line.get("charField1") or ""),doc_no=str(line.get("charField2") or "")))
     rows.extend(batch)
    except Exception as exc: issues.append(f'{rid}: '+(str(exc) if isinstance(exc,(ValueError,PreviewError)) else type(exc).__name__))
   if p>=count: return rows,issues,stats

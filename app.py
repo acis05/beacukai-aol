@@ -37,9 +37,24 @@ with engine.begin() as c:
 with engine.begin() as c:
  c.execute(text('CREATE TABLE IF NOT EXISTS movement_cost (ref VARCHAR(200) PRIMARY KEY, value NUMERIC(30,6))'))
  c.execute(text('CREATE TABLE IF NOT EXISTS opname (ref VARCHAR(200) PRIMARY KEY, day VARCHAR(10), code VARCHAR(100), qty NUMERIC(24,6), doc VARCHAR(100))'))
-def auth(u:HTTPBasicCredentials=Depends(basic)):
- p=os.getenv('ADMIN_PASSWORD','');
- if not p or p=='change-me' or not secrets.compare_digest(u.username,'admin') or not secrets.compare_digest(u.password,p): raise HTTPException(401,'Login diperlukan',headers={'WWW-Authenticate':'Basic'})
+def password_hash(password, salt):
+ import hashlib
+ return hashlib.scrypt(password.encode(),salt=bytes.fromhex(salt),n=16384,r=8,p=1).hex()
+with engine.begin() as c:
+ c.execute(text('CREATE TABLE IF NOT EXISTS app_users (username VARCHAR(80) PRIMARY KEY, salt TEXT NOT NULL, digest TEXT NOT NULL, role VARCHAR(20) NOT NULL)'))
+def auth(r:Request,u:HTTPBasicCredentials=Depends(basic)):
+ p=os.getenv('ADMIN_PASSWORD','')
+ role=None
+ if u.username=='admin':
+  if p and p!='change-me' and secrets.compare_digest(u.password.encode(),p.encode()): role='admin'
+ else:
+  with engine.connect() as c: row=c.execute(text('SELECT salt,digest,role FROM app_users WHERE username=:u'),{'u':u.username}).fetchone()
+  if row and secrets.compare_digest(password_hash(u.password,row[0]),row[1]): role=row[2]
+ if not role: raise HTTPException(401,'Login diperlukan',headers={'WWW-Authenticate':'Basic'})
+ path=r.url.path
+ if role!='admin' and (path.startswith(('/users','/databases','/oauth','/disconnect')) or (role=='viewer' and path not in ('/',) and not path.startswith('/report/'))): raise HTTPException(403,'Akses tidak diizinkan')
+ r.state.role=role
+ return role
 def guard(r:Request):
  if r.headers.get('origin') != (os.getenv('PUBLIC_ORIGIN') or str(r.base_url)).rstrip('/'): raise HTTPException(403,'Origin tidak sesuai')
 def audit(c,event): c.execute(text('INSERT INTO audit VALUES (:e,:t)'),{'e':event,'t':str(time.time())})
@@ -178,13 +193,14 @@ def report(n,start,end):
    sql=sql.replace("WHERE (i.category=:cat OR (:cat='BB' AND i.category='BP'))", "JOIN accurate_categories ac ON ac.code=i.code WHERE LOWER(TRIM(ac.label))=:label")
   rows=c.execute(text(sql),p).fetchall()
   if n>=3:
-   headers+=['Hasil Opname']
+   headers+=['Hasil Opname','Selisih']
    counts=c.execute(text('SELECT code,day,doc,SUM(qty) FROM opname WHERE day BETWEEN :a AND :b GROUP BY code,day,doc ORDER BY day DESC'),p).fetchall()
    latest={}; ambiguous=set()
    for code,day,doc,qty in counts:
     if code not in latest: latest[code]=(day,doc,qty)
     elif latest[code][0]==day and latest[code][1]!=doc: ambiguous.add(code)
    rows=[tuple(row)+(latest[row[0]][2] if row[0] in latest and row[0] not in ambiguous else None,) for row in rows]
+   rows=[row+(Decimal(str(row[-2]))-Decimal(str(row[-1])) if row[-1] is not None else None,) for row in rows]
   return headers,rows
 @app.get('/report/{n}',dependencies=[Depends(auth)])
 def view(n:int,start:date,end:date,download:bool=False):
@@ -196,9 +212,9 @@ def view(n:int,start:date,end:date,download:bool=False):
  diagnostic='Total mutasi lokal: '+str(total)+'; periode: '+(', '.join(str(k)+': '+str(v) for k,v in diag) or '0 mutasi')+'; barang belum diklasifikasi: '+str(unknown)+'; baris laporan: '+str(len(rows))
  if download:return excel(h,rows,'laporan_'+str(n))
  esc=lambda x:html.escape(format(x,',.2f').rstrip('0').rstrip('.').translate(str.maketrans(',.','.,')) if isinstance(x,(Decimal,float)) else str(x if x is not None else ''))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji tanpa dokumen BC — belum tervalidasi. Nilai barang: cost transaksi jika tersedia. Opname: hasil terakhir dalam periode; kosong jika tidak tersedia atau beberapa dokumen pada tanggal terakhir.</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji dokumen BC dari detail transaksi — belum tervalidasi. Nilai barang: cost transaksi jika tersedia. Opname: hasil terakhir dalam periode; kosong jika tidak tersedia atau beberapa dokumen pada tanggal terakhir.</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
-def home():
+def home(r:Request):
  with engine.connect() as c:
   counts=[c.execute(text('SELECT COUNT(*) FROM '+t)).scalar() for t in ('items','movements')]
   counts.append(c.execute(text("SELECT COUNT(*) FROM items WHERE category IS NULL OR category=''")).scalar())
@@ -209,8 +225,14 @@ def home():
  body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
  body+='<section><a class="btn" href="/stock-history">Preview histori stok 7 hari</a></section>'+sync_panel()
  body+='<section><h2>Sinkron Hasil Stok Opname</h2><p>Ambil hasil fisik dari Accurate. Pilih periode laporan.</p><form method="post" action="/sync/opname"><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Sinkron Hasil Opname</button></form></section>'
- body+=scope_panel()
- body+='<section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Dokumen BC tidak wajib untuk uji laporan. Saldo awal belum tervalidasi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
+ if r.state.role=='admin':
+  body+='<section><h2>Hak Akses</h2><a class="btn" href="/users">Kelola pengguna</a></section>'
+  body=body.replace('<a class="btn secondary" href="/databases">Pilih database</a>','<a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/disconnect"><button>Putuskan Data Accurate</button></form>')
+ else:
+  body=body.replace('<a class="btn secondary" href="/databases">Pilih database</a>','').replace('<a class="btn" href="/oauth/start">Hubungkan Accurate</a>','')
+  if r.state.role=='viewer': body='<div class="metrics">'+stats+'</div>'
+
+ body+='<section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Dokumen BC dibaca dari detail karakter transaksi. Saldo awal belum tervalidasi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
 
 # Professional interface and read-only transaction preview.
@@ -344,6 +366,7 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
       if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
       c.execute(text('INSERT INTO movements(ref,day,code,qty,kind) VALUES (:ref,:day,:code,:qty,:kind) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,kind=:kind'),row)
       if k in ('receive-item','delivery-order'):
+       c.execute(text('INSERT INTO bc(ref,doc_type,doc_no,doc_date) VALUES (:ref,:doc_type,:doc_no,NULL) ON CONFLICT(ref) DO UPDATE SET doc_type=:doc_type,doc_no=:doc_no'),row)
        c.execute(text('INSERT INTO movement_cost(ref,value) VALUES (:ref,:value) ON CONFLICT(ref) DO UPDATE SET value=:value'),{'ref':row['ref'],'value':Decimal(row['value']) if row.get('value') is not None and engine.dialect.name=='postgresql' else row.get('value')})
      audit(c,'sync '+k+' '+str(len(rows)))
     results.append((MODULES[k],len(rows),'Disimpan/diperbarui; '+summary+('; KENDALA: '+'; '.join(issues[:30]) if issues else '') if rows else 'Tidak ada mutasi; '+summary))
@@ -405,3 +428,31 @@ def sync_opname(r:Request,start:date=Form(...),end:date=Form(...)):
   return HTMLResponse(page('Hasil sinkron opname','<section><p>Baris tersimpan: '+str(len(rows))+'</p><a href="/#laporan">Buka laporan</a></section>'))
  except Exception as e:
   return HTMLResponse(page('Sinkron opname gagal','<section><p>'+html.escape(str(e) if isinstance(e,ValueError) else type(e).__name__)+'</p><p>Periksa scope stock_opname_result_view dan detail API.</p><a href="/">Kembali</a></section>'),status_code=502)
+
+@app.post('/disconnect',dependencies=[Depends(auth)])
+def disconnect(r:Request):
+ guard(r)
+ with engine.begin() as c:
+  c.execute(text("DELETE FROM settings WHERE k='token'")); audit(c,'disconnect Accurate')
+ return RedirectResponse('/',303)
+@app.get('/users',dependencies=[Depends(auth)])
+def users():
+ with engine.connect() as c: rows=c.execute(text('SELECT username,role FROM app_users ORDER BY username')).fetchall()
+ body='<section><p>Admin: akses penuh. Operator: sinkronisasi dan laporan tanpa pengaturan koneksi. Viewer: laporan saja.</p><form method="post" action="/users"><label>Username<input name="username" required maxlength="80"></label><label>Password baru<input name="password" type="password" required minlength="12"></label><label>Hak akses<select name="role"><option value="viewer">Viewer</option><option value="operator">Operator</option></select></label><button>Simpan pengguna</button></form><table><tr><th>User</th><th>Role</th><th>Aksi</th></tr>'
+ for u,role in rows:
+  e=html.escape(u,quote=True); body+='<tr><td>'+e+'</td><td>'+html.escape(role)+'</td><td><form method="post" action="/users/delete"><input type="hidden" name="username" value="'+e+'"><button>Hapus</button></form></td></tr>'
+ return HTMLResponse(page('Hak Akses',body+'</table></section>'))
+@app.post('/users',dependencies=[Depends(auth)])
+def save_user(r:Request,username:str=Form(...),password:str=Form(...),role:str=Form(...)):
+ guard(r)
+ import re
+ if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}',username) or username.lower()=='admin' or not 12<=len(password)<=256 or role not in ('viewer','operator'): raise HTTPException(400,'Data pengguna tidak valid')
+ salt=secrets.token_hex(16)
+ with engine.begin() as c:
+  c.execute(text('INSERT INTO app_users VALUES (:u,:s,:d,:r) ON CONFLICT(username) DO UPDATE SET salt=:s,digest=:d,role=:r'),{'u':username,'s':salt,'d':password_hash(password,salt),'r':role}); audit(c,'save user '+username)
+ return RedirectResponse('/users',303)
+@app.post('/users/delete',dependencies=[Depends(auth)])
+def delete_user(r:Request,username:str=Form(...)):
+ guard(r)
+ with engine.begin() as c: c.execute(text('DELETE FROM app_users WHERE username=:u'),{'u':username}); audit(c,'delete user '+username)
+ return RedirectResponse('/users',303)
