@@ -8,7 +8,7 @@ from urllib.parse import urlencode, urlparse
 import httpx
 from scope_diag import scopes, requested, reason
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, UploadFile, File, HTTPException, Depends
+from fastapi import Form, FastAPI, Request, UploadFile, File, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from starlette.middleware.sessions import SessionMiddleware
@@ -170,7 +170,7 @@ def view(n:int,start:date,end:date,download:bool=False):
  h,rows=report(n,start,end)
  if download:return excel(h,rows,'laporan_'+str(n))
  esc=lambda x:html.escape(str(x if x is not None else 'BELUM LENGKAP'))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p>'+('<p class="notice">Tidak ada baris sesuai periode/kategori. Import mutasi dan klasifikasi barang terlebih dahulu.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p>'+('<p class="notice">Tidak ada baris sesuai periode/kategori. Sinkronkan transaksi dan lengkapi klasifikasi barang terlebih dahulu.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
  with engine.connect() as c:
@@ -180,8 +180,9 @@ def home():
  esc=lambda x:html.escape(str(x))
  stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Dokumen BC'],counts))
  body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
+ body+=sync_panel()
  body+=scope_panel()
- body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in zip(HEADERS,['Klasifikasi barang','Mutasi persediaan','Dokumen BC']))+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Unduh draft dari preview, validasi qty dan jenis mutasi, lalu import Excel.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
+ body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in zip(HEADERS,['Klasifikasi barang','Mutasi persediaan','Dokumen BC']))+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Saldo awal dan dokumen BC tetap perlu dilengkapi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
 
 # Professional interface and read-only transaction preview.
@@ -276,3 +277,45 @@ def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1,downl
 def health():
  with engine.connect() as c: c.execute(text('SELECT 1'))
  return {'status':'ok'}
+
+from sync_inventory import collect, MODULES as SYNC_MODULES
+
+def sync_panel():
+ return '<section id="sinkron"><h2>Sinkronisasi transaksi Accurate</h2><p class="notice">Mode draft: penerimaan/pengiriman diasumsikan mutasi eksternal; validasi kepabeanan tetap diperlukan. Penyesuaian belum diposting otomatis. Jangan sinkronkan periode yang sudah diimport manual.</p><form method="post" action="/sync/transactions"><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><label>Modul<select name="module"><option value="all">Semua transaksi</option>'+''.join('<option value="'+k+'">'+MODULES[k]+'</option>' for k in SYNC_MODULES)+'</select></label><label><input type="checkbox" name="confirm" value="yes" required> Saya sudah memeriksa klasifikasi, satuan, dan tidak ada duplikasi import manual.</label><button>Sinkronisasi transaksi</button></form></section>'
+
+@app.post('/sync/transactions',dependencies=[Depends(auth)])
+def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:str=Form(...),confirm:str=Form(...)):
+ guard(r)
+ if start>end or (end-start).days>31 or confirm!='yes' or module not in (*SYNC_MODULES,'all'): raise HTTPException(400,'Periode maksimum 32 hari dan konfirmasi wajib')
+ db_id=selected_db()
+ if not db_id: raise HTTPException(409,'Pilih database dahulu')
+ esc=lambda x:html.escape(str(x))
+ results=[]
+ try:
+  h={'Authorization':'Bearer '+token()}; d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id}); host=d['host']; u=urlparse(host)
+  if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password or u.query or u.fragment: raise ValueError('Host invalid')
+  h['X-Session-ID']=d['session']
+  def get(path,params): return api(host.rstrip('/')+'/accurate/api/'+path,h,params)
+  for k in SYNC_MODULES if module=='all' else (module,):
+   try:
+    with engine.connect() as c: masters={x[0]:(x[1],x[2]) for x in c.execute(text('SELECT code,unit,category FROM items'))}
+    rows,issues=collect(get,k,start,end,db_id,masters)
+    if issues: results.append((MODULES[k],0,'Tidak disimpan: '+ '; '.join(issues[:30]))); continue
+    with engine.begin() as c:
+     if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items, movements, bc IN SHARE ROW EXCLUSIVE MODE'))
+     if c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()!=db_id: raise ValueError('Database berubah')
+     current={x[0]:(x[1],x[2]) for x in c.execute(text('SELECT code,unit,category FROM items'))}
+     if current!=masters: raise ValueError('Master berubah')
+     prefix=f'AOL:{db_id}:{k}:'
+     existing=c.execute(text('SELECT ref FROM movements WHERE day BETWEEN :a AND :b'),{'a':start.isoformat(),'b':end.isoformat()}).scalars().all()
+     if any(not x.startswith(f'AOL:{db_id}:') for x in existing): raise ValueError('Ada mutasi manual pada periode; rekonsiliasi dahulu')
+     newrefs={x['ref'] for x in rows}
+     if any(x.startswith(prefix) and x not in newrefs for x in existing): raise ValueError('Transaksi lama hilang/berubah tanggal; rekonsiliasi manual diperlukan')
+     for row in rows:
+      if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
+      c.execute(text('INSERT INTO movements(ref,day,code,qty,kind) VALUES (:ref,:day,:code,:qty,:kind) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,kind=:kind'),row)
+     audit(c,'sync '+k+' '+str(len(rows)))
+    results.append((MODULES[k],len(rows),'Disimpan/diperbarui'))
+   except Exception as e: results.append((MODULES[k],0,'Gagal: '+(str(e) if isinstance(e,ValueError) else type(e).__name__)))
+ except Exception as e: results.append(('Koneksi',0,type(e).__name__))
+ return HTMLResponse(page('Hasil sinkronisasi','<section><p class="notice">Draft. Periksa semua kendala sebelum menggunakan laporan.</p><table><tr><th>Modul</th><th>Baris</th><th>Status</th></tr>'+''.join('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in x)+'</tr>' for x in results)+'</table><a class="btn" href="/#laporan">Buka laporan</a></section>'),headers={'Cache-Control':'no-store'})
