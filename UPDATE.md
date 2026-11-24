@@ -1,4 +1,2 @@
-# Update v2.1
-Upload seluruh isi ZIP ke repository lama. Pertahankan DATABASE_URL, SESSION_SECRET dan kredensial OAuth. Backup database dahulu.
-Atur ACCURATE_SCOPE di Railway (pertahankan scope lama yang diperlukan): item_view job_order_view roll_over_view receive_item_view delivery_order_view item_adjustment_view. Hubungkan ulang Accurate dan setujui izin baru. Pastikan scope tersedia pada aplikasi developer.
-Preview enam modul menggunakan GET, filter tanggal transaksi dan nomor halaman (20 record). Master item tanpa filter tanggal. Penyesuaian menampilkan JSON mentah. Parameter id pada detail dan bentuk response masih perlu uji live. Tidak ada penulisan transaksi Accurate. Preview tidak masuk laporan lokal. Laporan tetap draft.
+# v2.2 API Connection Fix
+Backup PostgreSQL. Upload isi ZIP ke repo lama. Pertahankan SESSION_SECRET dan DATABASE_URL. Pastikan ACCURATE_SCOPE berisi item_view job_order_view roll_over_view receive_item_view delivery_order_view item_adjustment_view, dan izin tersedia di Accurate Developer. Hubungkan ulang OAuth. Preview sekarang membedakan kegagalan list, detail, dan mapping; data detail tersedia untuk admin. Tidak ada perubahan transaksi Accurate atau mutasi lokal. Parameter id detail masih perlu verifikasi live. Jangan bagikan data transaksi sensitif saat melaporkan error.

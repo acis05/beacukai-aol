@@ -1,24 +1,30 @@
 # GET endpoints confirmed; detail response mapping remains provisional.
 from decimal import Decimal
 MODULES={'item':'Barang & Jasa','job-order':'Pekerjaan Pesanan','roll-over':'Penyelesaian Pesanan','receive-item':'Penerimaan Barang','delivery-order':'Pengiriman Pesanan','item-adjustment':'Penyesuaian Persediaan'}
+class PreviewError(ValueError): pass
+
 def fetch_records(get,module,start=None,end=None,page=1):
  from datetime import date
  if module not in MODULES or page<1: raise ValueError('module/page')
  params={'sp.page':page,'sp.pageSize':20}
- if module!='roll-over': params['fields']='id'
  if start or end:
   if module=='item' or not start or not end: raise ValueError('date filter')
   a,b=date.fromisoformat(start),date.fromisoformat(end)
   if a>b: raise ValueError('date range')
   params.update({'filter.transDate.op':'BETWEEN','filter.transDate.val[0]':a.strftime('%d/%m/%Y'),'filter.transDate.val[1]':b.strftime('%d/%m/%Y')})
  result=get(module+'/list.do',params)
- if not isinstance(result['d'],list): raise ValueError('list')
- records=[]
+ if not isinstance(result.get('d'),list): raise PreviewError('Response list tidak berisi array d')
+ records=[]; issues=[]
  for entry in result['d'][:20]:
-  record=get(module+'/detail.do',{'id':entry['id']})['d']
-  if not isinstance(record,dict): raise ValueError('detail')
-  records.append(record)
- return records
+  if not isinstance(entry,dict) or entry.get('id') is None:
+   issues.append('List tidak memiliki ID transaksi'); continue
+  try:
+   record=get(module+'/detail.do',{'id':entry['id']}).get('d')
+   if not isinstance(record,dict): raise PreviewError('Response detail bukan objek d')
+   records.append(record)
+  except Exception as e:
+   issues.append('Detail ID '+str(entry['id'])+': '+(str(e) if isinstance(e,PreviewError) else type(e).__name__))
+ return records,issues
 
 def name(v):
  return v.get('name','') if isinstance(v,dict) else (v or '')

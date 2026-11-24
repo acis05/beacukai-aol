@@ -182,28 +182,54 @@ def preview_form(k,v):
  return f'<form method="get" action="/sync/preview/{k}" class="report"><b>{v}</b>{dates}<label>Halaman<input type="number" name="page_no" min="1" value="1" required></label><button class="secondary">Baca data</button></form>'
 
 @app.get('/sync/preview/{module}', dependencies=[Depends(auth)])
-@app.post('/sync/preview/{module}', dependencies=[Depends(auth)])
 def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1):
- if r.method=='POST': guard(r)
+ import json, logging
+ from accurate_read import PreviewError
  if module not in MODULES: raise HTTPException(404)
- db_id=selected_db()
- if not db_id: raise HTTPException(409,'Pilih database dahulu')
- h={'Authorization':'Bearer '+token()}
- d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id})
- host=d['host']; u=urlparse(host)
- if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password: raise HTTPException(502,'Host tidak valid')
- h['X-Session-ID']=d['session']
+ esc=lambda v:html.escape(str(v),quote=True)
+ stage='OAuth / database'
+ def fail(message):
+  return HTMLResponse(page(MODULES[module], '<section><h2>Pembacaan belum berhasil</h2><p class="notice">'+esc(message)+'</p><p>Scope yang diperlukan: <code>'+esc(module.replace('-','_')+'_view')+'</code></p><p>Periksa izin di Accurate Developer dan hubungkan ulang OAuth jika scope berubah.</p><a class="btn" href="/#integrasi">Kembali ke integrasi</a></section>'),status_code=502)
  try:
-  records=fetch_records(lambda path,params:api(host.rstrip('/')+'/accurate/api/'+path,h,params),module,start,end,page_no)
-  rows=[row for record in records for row in normalize(module,record)] if module!='item-adjustment' else []
- except (ValueError,KeyError,TypeError,httpx.HTTPError,HTTPException) as e:
-  raise HTTPException(502,'Preview gagal. Periksa scope view, endpoint list/detail dan struktur response Accurate.') from e
- if selected_db()!=db_id: raise HTTPException(409,'Database berubah')
- if module=='item-adjustment':
-  import json
-  return HTMLResponse(page(MODULES[module], '<p class="notice">Data mentah; arah mutasi belum divalidasi.</p><section><pre>'+html.escape(json.dumps(records,ensure_ascii=False,indent=2))+'</pre></section>'))
+  db_id=selected_db()
+  if not db_id: return fail('Pilih database dahulu.')
+  h={'Authorization':'Bearer '+token()}
+  d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id})
+  host=d['host']; u=urlparse(host)
+  if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password or u.query or u.fragment: return fail('Host Accurate tidak valid.')
+  h['X-Session-ID']=d['session']
+  def get(path,params):
+   nonlocal stage
+   stage=path
+   response=httpx.get(host.rstrip('/')+'/accurate/api/'+path,headers=h,params=params,timeout=30)
+   if response.status_code!=200: raise PreviewError('HTTP '+str(response.status_code)+' pada '+path)
+   data=response.json()
+   if not isinstance(data,dict): raise PreviewError('Response bukan objek JSON pada '+path)
+   if data.get('s') is not True:
+    # Do not expose arbitrary upstream messages or credentials.
+    raise PreviewError('Accurate menolak '+path+' (s bukan true). Periksa scope, parameter dan izin database.')
+   return data
+  stage='list/detail'
+  records,issues=fetch_records(get,module,start,end,page_no)
+  if selected_db()!=db_id: return fail('Database berubah; ulangi pembacaan.')
+ except PreviewError as e: return fail(str(e))
+ except httpx.HTTPStatusError as e: return fail(stage+': HTTP '+str(e.response.status_code))
+ except HTTPException as e: return fail(stage+': '+str(e.detail))
+ except Exception as e:
+  logging.getLogger('uvicorn.error').warning('Preview %s stage=%s type=%s',module,stage,type(e).__name__)
+  return fail(stage+': '+type(e).__name__+'. Periksa log Railway.')
+ rows=[]
+ for record in records:
+  if module=='item-adjustment': continue
+  try: rows.extend(normalize(module,record))
+  except Exception as e: issues.append('Mapping transaksi '+str(record.get('id','?'))+': '+type(e).__name__)
  headers=['Nomor','Tanggal','Kode','Nama','Qty','Satuan','Gudang','Referensi pekerjaan','Tipe']
- return HTMLResponse(page(MODULES[module], '<p class="notice">Preview maksimal 20 transaksi per halaman. Belum dimasukkan ke buku mutasi. Verifikasi mapping dan satuan sebelum sinkronisasi resmi.</p><div class="table-wrap"><table><thead><tr>'+''.join('<th>'+x+'</th>' for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</tbody></table></div>'))
+ body='<section><p class="notice">Preview saja; tidak mengubah Accurate atau buku mutasi. Detail berhasil: '+str(len(records))+'; kendala: '+str(len(issues))+'</p><a class="btn secondary" href="/#integrasi">Kembali</a>'
+ if issues: body+='<ul>'+''.join('<li>'+esc(x)+'</li>' for x in issues)+'</ul>'
+ if not records and not issues: body+='<p>Tidak ada transaksi pada halaman/periode ini.</p>'
+ if rows: body+='<div class="table-wrap"><table><thead><tr>'+''.join('<th>'+x+'</th>' for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in row)+'</tr>' for row in rows)+'</tbody></table></div>'
+ body+='<details><summary>Data detail API (internal admin)</summary><pre>'+esc(json.dumps(records,ensure_ascii=False,indent=2))+'</pre></details></section>'
+ return HTMLResponse(page(MODULES[module],body),headers={'Cache-Control':'no-store'})
 
 @app.get('/health')
 def health():
