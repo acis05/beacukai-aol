@@ -169,6 +169,9 @@ def report(n,start,end):
    p['kind']='IN' if n==1 else 'OUT'; sql='SELECT m.day,m.ref,m.code,i.name,i.unit,m.qty,b.doc_type,b.doc_no,b.doc_date FROM movements m JOIN items i ON i.code=m.code LEFT JOIN bc b ON b.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.kind=:kind ORDER BY m.day,m.ref'; headers=['Tanggal','Referensi','Kode','Barang','Satuan','Qty bertanda','Jenis BC','Nomor BC','Tanggal BC']
   else:
    p['cat']={3:'BB',4:'FG',5:'WIP',6:'ASET',7:'SCRAP'}[n]; sql="SELECT i.code,i.name,i.unit,COALESCE(SUM(CASE WHEN m.day<:a THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.qty>0 AND m.kind<>'ADJ' THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.qty<0 AND m.kind<>'ADJ' THEN -m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.kind='ADJ' THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day<=:b THEN m.qty ELSE 0 END),0) FROM items i LEFT JOIN movements m ON m.code=i.code WHERE (i.category=:cat OR (:cat='BB' AND i.category='BP')) GROUP BY i.code,i.name,i.unit ORDER BY i.code"; headers=['Kode','Barang','Satuan','Awal','Masuk','Keluar','Penyesuaian','Akhir']
+  if n in (3,4):
+   p['label']='bahan baku' if n==3 else 'barang jadi'
+   sql=sql.replace("WHERE (i.category=:cat OR (:cat='BB' AND i.category='BP'))", "JOIN accurate_categories ac ON ac.code=i.code WHERE LOWER(TRIM(ac.label))=:label")
   return headers,c.execute(text(sql),p).fetchall()
 @app.get('/report/{n}',dependencies=[Depends(auth)])
 def view(n:int,start:date,end:date,download:bool=False):
@@ -180,7 +183,7 @@ def view(n:int,start:date,end:date,download:bool=False):
  diagnostic='Total mutasi lokal: '+str(total)+'; periode: '+(', '.join(str(k)+': '+str(v) for k,v in diag) or '0 mutasi')+'; barang belum diklasifikasi: '+str(unknown)+'; baris laporan: '+str(len(rows))
  if download:return excel(h,rows,'laporan_'+str(n))
  esc=lambda x:html.escape(str(x if x is not None else ''))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji tanpa dokumen BC — belum tervalidasi</p><p>'+esc(diagnostic)+'</p><a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji tanpa dokumen BC — belum tervalidasi</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
  with engine.connect() as c:

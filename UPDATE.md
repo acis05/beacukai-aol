@@ -6,3 +6,9 @@ Mode uji tanpa impor BC; endpoint impor dinonaktifkan, data lama dipertahankan. 
 
 ## v2.9
 Filter satu hari EQUAL; fallback daftar tanpa filter jika kosong; opsi diagnostik tanpa filter, tanggal detail disaring lokal. Scan penuh dapat lambat pada database besar. Uji mock saja, belum API live.
+
+## v3.0
+- Premium UI: navy sidebar, teal accents, typography, tables and responsive layout.
+- Reports 3 and 4 use exact Accurate category labels (case/outer whitespace normalized), from accurate_categories, not legacy aliases.
+- Source is locally synchronized transaction history, not direct stock-history API. The latter remains a seven-day preview until actual response mapping is validated. Opening balances remain unvalidated.
+- Re-sync master to populate category labels. No database reset or new scopes required.
