@@ -52,7 +52,14 @@ def collect(get,module,start,end,db_id,masters,unfiltered=False):
      kind,sign={'receive-item':('IN',1),'delivery-order':('OUT',-1),'job-order':('PROD',-1),'roll-over':('PROD',1)}[module]
      ref=f"AOL:{db_id}:{module}:{rid}:{line['id']}"
      if line['id'] is None or len(ref)>200 or ref in refs: raise ValueError('ID detail tidak valid')
-     refs.add(ref); batch.append(dict(ref=ref,day=day.isoformat(),code=code,qty=str(q*sign),kind=kind))
+     refs.add(ref)
+     value=None
+     if module in ('receive-item','delivery-order') and line.get('itemCost') is not None:
+      try:
+       cost=Decimal(str(line['itemCost']))
+       if cost.is_finite() and cost>=0: value=str(q*cost)
+      except Exception: pass
+     batch.append(dict(ref=ref,day=day.isoformat(),code=code,qty=str(q*sign),kind=kind,value=value))
     rows.extend(batch)
    except Exception as exc: issues.append(f'{rid}: '+(str(exc) if isinstance(exc,(ValueError,PreviewError)) else type(exc).__name__))
   if p>=count: return rows,issues,stats

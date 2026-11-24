@@ -34,6 +34,9 @@ engine=create_engine(db_url,pool_pre_ping=True)
 with engine.begin() as c:
  for sql in ['CREATE TABLE IF NOT EXISTS items (code VARCHAR(100) PRIMARY KEY, name TEXT NOT NULL, category VARCHAR(30), unit VARCHAR(30))','CREATE TABLE IF NOT EXISTS movements (ref VARCHAR(200) PRIMARY KEY, day VARCHAR(10), code VARCHAR(100) REFERENCES items(code), qty NUMERIC(24,6), kind VARCHAR(20))','CREATE TABLE IF NOT EXISTS bc (ref VARCHAR(200) PRIMARY KEY, doc_type TEXT, doc_no TEXT, doc_date VARCHAR(10))','CREATE TABLE IF NOT EXISTS settings (k VARCHAR(50) PRIMARY KEY, v TEXT)','CREATE TABLE IF NOT EXISTS accurate_categories (code VARCHAR(100) PRIMARY KEY, label TEXT)', 'CREATE TABLE IF NOT EXISTS audit (event TEXT, stamp VARCHAR(40))']:
   c.execute(text(sql))
+with engine.begin() as c:
+ c.execute(text('CREATE TABLE IF NOT EXISTS movement_cost (ref VARCHAR(200) PRIMARY KEY, value NUMERIC(30,6))'))
+ c.execute(text('CREATE TABLE IF NOT EXISTS opname (ref VARCHAR(200) PRIMARY KEY, day VARCHAR(10), code VARCHAR(100), qty NUMERIC(24,6), doc VARCHAR(100))'))
 def auth(u:HTTPBasicCredentials=Depends(basic)):
  p=os.getenv('ADMIN_PASSWORD','');
  if not p or p=='change-me' or not secrets.compare_digest(u.username,'admin') or not secrets.compare_digest(u.password,p): raise HTTPException(401,'Login diperlukan',headers={'WWW-Authenticate':'Basic'})
@@ -130,6 +133,7 @@ def excel(headers,rows,name):
   s.append(list(row))
   for cell in s[s.max_row]:
    if isinstance(cell.value,str): cell.data_type='s'
+   elif isinstance(cell.value,(int,float,Decimal)): cell.number_format='#,##0.##'
  b=io.BytesIO(); w.save(b); b.seek(0); return StreamingResponse(b,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':f'attachment; filename={name}.xlsx'})
 @app.post('/import/{table}',dependencies=[Depends(auth)])
 def upload(r:Request,table:str,file:UploadFile=File(...)):
@@ -166,13 +170,22 @@ def report(n,start,end):
  with engine.connect() as c:
   p={'a':start.isoformat(),'b':end.isoformat()}
   if n<=2:
-   p['kind']='IN' if n==1 else 'OUT'; sql='SELECT m.day,m.ref,m.code,i.name,i.unit,m.qty,b.doc_type,b.doc_no,b.doc_date FROM movements m JOIN items i ON i.code=m.code LEFT JOIN bc b ON b.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.kind=:kind ORDER BY m.day,m.ref'; headers=['Tanggal','Referensi','Kode','Barang','Satuan','Qty bertanda','Jenis BC','Nomor BC','Tanggal BC']
+   p['kind']='IN' if n==1 else 'OUT'; sql='SELECT m.day,m.ref,m.code,i.name,i.unit,m.qty,b.doc_type,b.doc_no,b.doc_date,mc.value FROM movements m JOIN items i ON i.code=m.code LEFT JOIN bc b ON b.ref=m.ref LEFT JOIN movement_cost mc ON mc.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.kind=:kind ORDER BY m.day,m.ref'; headers=['Tanggal','Referensi','Kode','Barang','Satuan','Qty bertanda','Jenis BC','Nomor BC','Tanggal BC','Nilai Barang']
   else:
    p['cat']={3:'BB',4:'FG',5:'WIP',6:'ASET',7:'SCRAP'}[n]; sql="SELECT i.code,i.name,i.unit,COALESCE(SUM(CASE WHEN m.day<:a THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.qty>0 AND m.kind<>'ADJ' THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.qty<0 AND m.kind<>'ADJ' THEN -m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day BETWEEN :a AND :b AND m.kind='ADJ' THEN m.qty ELSE 0 END),0),COALESCE(SUM(CASE WHEN m.day<=:b THEN m.qty ELSE 0 END),0) FROM items i LEFT JOIN movements m ON m.code=i.code WHERE (i.category=:cat OR (:cat='BB' AND i.category='BP')) GROUP BY i.code,i.name,i.unit ORDER BY i.code"; headers=['Kode','Barang','Satuan','Awal','Masuk','Keluar','Penyesuaian','Akhir']
   if n in (3,4):
    p['label']='bahan baku' if n==3 else 'barang jadi'
    sql=sql.replace("WHERE (i.category=:cat OR (:cat='BB' AND i.category='BP'))", "JOIN accurate_categories ac ON ac.code=i.code WHERE LOWER(TRIM(ac.label))=:label")
-  return headers,c.execute(text(sql),p).fetchall()
+  rows=c.execute(text(sql),p).fetchall()
+  if n>=3:
+   headers+=['Hasil Opname']
+   counts=c.execute(text('SELECT code,day,doc,SUM(qty) FROM opname WHERE day BETWEEN :a AND :b GROUP BY code,day,doc ORDER BY day DESC'),p).fetchall()
+   latest={}; ambiguous=set()
+   for code,day,doc,qty in counts:
+    if code not in latest: latest[code]=(day,doc,qty)
+    elif latest[code][0]==day and latest[code][1]!=doc: ambiguous.add(code)
+   rows=[tuple(row)+(latest[row[0]][2] if row[0] in latest and row[0] not in ambiguous else None,) for row in rows]
+  return headers,rows
 @app.get('/report/{n}',dependencies=[Depends(auth)])
 def view(n:int,start:date,end:date,download:bool=False):
  h,rows=report(n,start,end)
@@ -182,8 +195,8 @@ def view(n:int,start:date,end:date,download:bool=False):
   unknown=c.execute(text("SELECT COUNT(*) FROM items WHERE category IS NULL OR category=''")).scalar()
  diagnostic='Total mutasi lokal: '+str(total)+'; periode: '+(', '.join(str(k)+': '+str(v) for k,v in diag) or '0 mutasi')+'; barang belum diklasifikasi: '+str(unknown)+'; baris laporan: '+str(len(rows))
  if download:return excel(h,rows,'laporan_'+str(n))
- esc=lambda x:html.escape(str(x if x is not None else ''))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji tanpa dokumen BC — belum tervalidasi</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ esc=lambda x:html.escape(format(x,',.2f').rstrip('0').rstrip('.').translate(str.maketrans(',.','.,')) if isinstance(x,(Decimal,float)) else str(x if x is not None else ''))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji tanpa dokumen BC — belum tervalidasi. Nilai barang: cost transaksi jika tersedia. Opname: hasil terakhir dalam periode; kosong jika tidak tersedia atau beberapa dokumen pada tanggal terakhir.</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
  with engine.connect() as c:
@@ -195,6 +208,7 @@ def home():
  stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Barang belum diklasifikasi'],counts))
  body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
  body+='<section><a class="btn" href="/stock-history">Preview histori stok 7 hari</a></section>'+sync_panel()
+ body+='<section><h2>Sinkron Hasil Stok Opname</h2><p>Ambil hasil fisik dari Accurate. Pilih periode laporan.</p><form method="post" action="/sync/opname"><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Sinkron Hasil Opname</button></form></section>'
  body+=scope_panel()
  body+='<section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal. Gunakan sinkronisasi transaksi. Dokumen BC tidak wajib untuk uji laporan. Saldo awal belum tervalidasi.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
@@ -329,6 +343,8 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
      for row in rows:
       if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
       c.execute(text('INSERT INTO movements(ref,day,code,qty,kind) VALUES (:ref,:day,:code,:qty,:kind) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,kind=:kind'),row)
+      if k in ('receive-item','delivery-order'):
+       c.execute(text('INSERT INTO movement_cost(ref,value) VALUES (:ref,:value) ON CONFLICT(ref) DO UPDATE SET value=:value'),{'ref':row['ref'],'value':Decimal(row['value']) if row.get('value') is not None and engine.dialect.name=='postgresql' else row.get('value')})
      audit(c,'sync '+k+' '+str(len(rows)))
     results.append((MODULES[k],len(rows),'Disimpan/diperbarui; '+summary+('; KENDALA: '+'; '.join(issues[:30]) if issues else '') if rows else 'Tidak ada mutasi; '+summary))
    except Exception as e: results.append((MODULES[k],0,'Gagal: '+(str(e) if isinstance(e,ValueError) else type(e).__name__)))
@@ -363,3 +379,29 @@ def stock_history(page_no:int=1):
  h['X-Session-ID']=d['session']
  result=api(d['host'].rstrip('/')+'/accurate/api/item/stock-mutation-history.do',h,{'sp.page':page_no,'sp.pageSize':20})
  return HTMLResponse(page('Histori stok Accurate','<section><p>Preview 7 hari terakhir; belum diposting agar tidak menggandakan mutasi.</p><pre>'+html.escape(json.dumps(result,ensure_ascii=False,indent=2))+'</pre><a href="/stock-history?page_no='+str(page_no+1)+'">Halaman berikutnya</a> · <a href="/">Kembali</a></section>'),headers={'Cache-Control':'no-store'})
+
+@app.post('/sync/opname',dependencies=[Depends(auth)])
+def sync_opname(r:Request,start:date=Form(...),end:date=Form(...)):
+ guard(r)
+ if start>end: raise HTTPException(400,'Periode salah')
+ db_id=selected_db()
+ if not db_id: raise HTTPException(409,'Pilih database dahulu')
+ from opname import collect_opname
+ try:
+  h={'Authorization':'Bearer '+token()}; d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id}); host=d['host']; u=urlparse(host)
+  if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password or u.query or u.fragment: raise ValueError('Host invalid')
+  h['X-Session-ID']=d['session']
+  def get(path,params): return api(host.rstrip('/')+'/accurate/api/'+path,h,params)
+  with engine.connect() as c: masters=set(c.execute(text('SELECT code FROM items')).scalars())
+  rows=collect_opname(get,start,end,masters)
+  with engine.begin() as c:
+   if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items, opname IN SHARE ROW EXCLUSIVE MODE'))
+   if c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()!=db_id: raise ValueError('Database berubah')
+   c.execute(text('DELETE FROM opname WHERE day BETWEEN :a AND :b'),{'a':start.isoformat(),'b':end.isoformat()})
+   for row in rows:
+    if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
+    c.execute(text('INSERT INTO opname(ref,day,code,qty,doc) VALUES (:ref,:day,:code,:qty,:doc) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,doc=:doc'),row)
+   audit(c,'sync opname '+str(len(rows)))
+  return HTMLResponse(page('Hasil sinkron opname','<section><p>Baris tersimpan: '+str(len(rows))+'</p><a href="/#laporan">Buka laporan</a></section>'))
+ except Exception as e:
+  return HTMLResponse(page('Sinkron opname gagal','<section><p>'+html.escape(str(e) if isinstance(e,ValueError) else type(e).__name__)+'</p><p>Periksa scope stock_opname_result_view dan detail API.</p><a href="/">Kembali</a></section>'),status_code=502)

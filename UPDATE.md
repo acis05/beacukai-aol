@@ -12,3 +12,8 @@ Filter satu hari EQUAL; fallback daftar tanpa filter jika kosong; opsi diagnosti
 - Reports 3 and 4 use exact Accurate category labels (case/outer whitespace normalized), from accurate_categories, not legacy aliases.
 - Source is locally synchronized transaction history, not direct stock-history API. The latter remains a seven-day preview until actual response mapping is validated. Opening balances remain unvalidated.
 - Re-sync master to populate category labels. No database reset or new scopes required.
+
+## v3.1
+- Nilai Barang = kuantitas satuan master x itemCost pada detail transaksi, jika tersedia. Asumsi itemCost per satuan dasar perlu validasi Accurate, terutama delivery-order. Tidak memakai harga jual.
+- Hasil Opname: sinkron terpisah, GET list/detail, scope stock_opname_result_view. Hubungkan ulang OAuth setelah izin ditambahkan. Hasil terakhir dalam periode; beberapa dokumen pada tanggal terakhir ditandai kosong karena gudang/cakupan belum tervalidasi. Asumsi quantity satuan master.
+- Tampilan dan format Excel maksimal dua desimal. Data lama perlu sinkron ulang untuk cost. Backup sebelum deploy. Saldo awal dan mapping lama masih draft.
