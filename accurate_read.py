@@ -16,14 +16,14 @@ def fetch_records(get,module,start=None,end=None,page=1):
  if not isinstance(result.get('d'),list): raise PreviewError('Response list tidak berisi array d')
  records=[]; issues=[]
  for entry in result['d'][:20]:
-  if not isinstance(entry,dict) or entry.get('id') is None:
+  if not isinstance(entry,dict) or (entry.get('id') is None and not entry.get('number')):
    issues.append('List tidak memiliki ID transaksi'); continue
   try:
-   record=get(module+'/detail.do',{'id':entry['id']}).get('d')
+   record=get(module+'/detail.do',{'id':entry['id']} if entry.get('id') is not None else {'number':entry['number']}).get('d')
    if not isinstance(record,dict): raise PreviewError('Response detail bukan objek d')
    records.append(record)
   except Exception as e:
-   issues.append('Detail ID '+str(entry['id'])+': '+(str(e) if isinstance(e,PreviewError) else type(e).__name__))
+   issues.append('Detail ID '+str(entry.get('id') or entry.get('number'))+': '+(str(e) if isinstance(e,PreviewError) else type(e).__name__))
  return records,issues
 
 def name(v):

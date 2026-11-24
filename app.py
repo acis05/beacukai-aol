@@ -6,6 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import urlencode, urlparse
 import httpx
+from scope_diag import scopes, requested, reason
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
@@ -45,19 +46,28 @@ def save_token(d):
  with engine.begin() as c: c.execute(text("INSERT INTO settings VALUES ('token',:v) ON CONFLICT(k) DO UPDATE SET v=:v"),{'v':v})
 def token_request(data):
  r=httpx.post('https://account.accurate.id/oauth/token',data=data,auth=(os.environ['ACCURATE_CLIENT_ID'],os.environ['ACCURATE_CLIENT_SECRET']),timeout=30); r.raise_for_status(); return r.json()
-def token():
+def token_data():
  import json
  with engine.connect() as c: v=c.execute(text("SELECT v FROM settings WHERE k='token'")).scalar()
  if not v: raise HTTPException(409,'Hubungkan Accurate dahulu')
  try: d=json.loads(fernet.decrypt(v.encode()))
  except InvalidToken: raise HTTPException(409,'Token lama tidak dapat dibaca. Hubungkan Accurate kembali melalui halaman utama.')
  if d['expires_at']<time.time()+60:
-  new=token_request({'grant_type':'refresh_token','refresh_token':d['refresh_token']}); new.setdefault('refresh_token',d['refresh_token']); save_token(new); d=new
- return d['access_token']
+  new=token_request({'grant_type':'refresh_token','refresh_token':d['refresh_token']}); new.setdefault('refresh_token',d['refresh_token']);
+  if 'scope' in d: new.setdefault('scope',d['scope'])
+  save_token(new); d=new
+ return d
+def token(): return token_data()['access_token']
+def scope_panel():
+ esc=lambda x:html.escape(str(x),quote=True)
+ wanted=scopes(requested(os.getenv('ACCURATE_SCOPE','')))
+ try: granted=scopes(token_data().get('scope'))
+ except Exception: granted=None
+ return '<section><h2>Diagnostik izin OAuth</h2><p>Scope diminta: '+esc(' '.join(sorted(wanted)))+'</p><p>Scope diberikan: '+esc(' '.join(sorted(granted)) if granted is not None else 'Belum diketahui; hubungkan ulang')+'</p><ul>'+''.join('<li>'+esc(k)+': '+('Diberikan' if granted is not None and k in granted else 'Belum diberikan' if granted is not None else 'Belum diketahui')+'</li>' for k in sorted(wanted))+'</ul><a class="btn" href="/oauth/start">Otorisasi ulang Accurate</a></section>'
 @app.get('/oauth/start',dependencies=[Depends(auth)])
 def start(r:Request):
  state=secrets.token_urlsafe(32); r.session['state']=state
- return RedirectResponse('https://account.accurate.id/oauth/authorize?'+urlencode({'client_id':os.environ['ACCURATE_CLIENT_ID'],'redirect_uri':os.environ['ACCURATE_REDIRECT_URI'],'response_type':'code','scope':os.getenv('ACCURATE_SCOPE','item_view'),'state':state}))
+ return RedirectResponse('https://account.accurate.id/oauth/authorize?'+urlencode({'client_id':os.environ['ACCURATE_CLIENT_ID'],'redirect_uri':os.environ['ACCURATE_REDIRECT_URI'],'response_type':'code','scope':requested(os.getenv('ACCURATE_SCOPE','')),'state':state}))
 @app.get('/oauth/callback',dependencies=[Depends(auth)])
 def callback(r:Request,code:str,state:str):
  if not secrets.compare_digest(r.session.pop('state',''),state): raise HTTPException(400,'State salah')
@@ -170,6 +180,7 @@ def home():
  esc=lambda x:html.escape(str(x))
  stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Dokumen BC'],counts))
  body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
+ body+=scope_panel()
  body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in zip(HEADERS,['Klasifikasi barang','Mutasi persediaan','Dokumen BC']))+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal, bukan hasil preview API.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
  return page('Dashboard',body)
 
@@ -193,7 +204,9 @@ def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1):
  try:
   db_id=selected_db()
   if not db_id: return fail('Pilih database dahulu.')
-  h={'Authorization':'Bearer '+token()}
+  td=token_data(); granted=scopes(td.get('scope')); need=module.replace('-','_')+'_view'
+  if granted is not None and need not in granted: return fail('Scope belum diberikan oleh Accurate: '+need+'. Otorisasi ulang melalui dashboard.')
+  h={'Authorization':'Bearer '+td['access_token']}
   d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id})
   host=d['host']; u=urlparse(host)
   if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password or u.query or u.fragment: return fail('Host Accurate tidak valid.')
@@ -202,7 +215,7 @@ def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1):
    nonlocal stage
    stage=path
    response=httpx.get(host.rstrip('/')+'/accurate/api/'+path,headers=h,params=params,timeout=30)
-   if response.status_code!=200: raise PreviewError('HTTP '+str(response.status_code)+' pada '+path)
+   if response.status_code!=200: raise PreviewError('HTTP '+str(response.status_code)+' pada '+path+' — '+reason(response))
    data=response.json()
    if not isinstance(data,dict): raise PreviewError('Response bukan objek JSON pada '+path)
    if data.get('s') is not True:
