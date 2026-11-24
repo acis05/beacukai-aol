@@ -21,7 +21,8 @@ if os.getenv('RAILWAY_ENVIRONMENT'):
  for key in ('DATABASE_URL','ADMIN_PASSWORD','SESSION_SECRET','TOKEN_KEY'):
   if not os.getenv(key) or os.getenv(key).startswith('change-me'): raise RuntimeError('Missing secure variable: '+key)
  if not db_url.startswith('postgresql+psycopg://'): raise RuntimeError('PostgreSQL required on Railway')
- Fernet(os.environ['TOKEN_KEY'])
+ try: Fernet(os.environ['TOKEN_KEY'])
+ except ValueError as e: raise RuntimeError("TOKEN_KEY tidak valid: gunakan Fernet.generate_key(), bukan placeholder") from e
 engine=create_engine(db_url,pool_pre_ping=True)
 with engine.begin() as c:
  for sql in ['CREATE TABLE IF NOT EXISTS items (code VARCHAR(100) PRIMARY KEY, name TEXT NOT NULL, category VARCHAR(30), unit VARCHAR(30))','CREATE TABLE IF NOT EXISTS movements (ref VARCHAR(200) PRIMARY KEY, day VARCHAR(10), code VARCHAR(100) REFERENCES items(code), qty NUMERIC(24,6), kind VARCHAR(20))','CREATE TABLE IF NOT EXISTS bc (ref VARCHAR(200) PRIMARY KEY, doc_type TEXT, doc_no TEXT, doc_date VARCHAR(10))','CREATE TABLE IF NOT EXISTS settings (k VARCHAR(50) PRIMARY KEY, v TEXT)','CREATE TABLE IF NOT EXISTS audit (event TEXT, stamp VARCHAR(40))']:
@@ -53,16 +54,35 @@ def start(r:Request):
 @app.get('/oauth/callback',dependencies=[Depends(auth)])
 def callback(r:Request,code:str,state:str):
  if not secrets.compare_digest(r.session.pop('state',''),state): raise HTTPException(400,'State salah')
- save_token(token_request({'grant_type':'authorization_code','code':code,'redirect_uri':os.environ['ACCURATE_REDIRECT_URI']})); return RedirectResponse('/')
+ save_token(token_request({'grant_type':'authorization_code','code':code,'redirect_uri':os.environ['ACCURATE_REDIRECT_URI']})); return RedirectResponse('/databases')
 def api(url,headers,params=None):
  r=httpx.get(url,headers=headers,params=params,timeout=30); r.raise_for_status(); d=r.json()
  if not d.get('s'): raise HTTPException(502,'Accurate menolak permintaan')
  return d
-@app.get('/databases',dependencies=[Depends(auth)])
-def databases(): return api('https://account.accurate.id/api/db-list.do',{'Authorization':'Bearer '+token()})['d']
+def selected_db():
+ with engine.connect() as c: return c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()
+def available_dbs():
+ return api('https://account.accurate.id/api/db-list.do',{'Authorization':'Bearer '+token()})['d']
+@app.get('/databases',response_class=HTMLResponse,dependencies=[Depends(auth)])
+def databases():
+ current=selected_db(); esc=lambda x:html.escape(str(x),quote=True)
+ options=''.join('<option value="'+esc(d['id'])+'"'+(' selected' if str(d['id'])==current else '')+'>'+esc(d.get('alias') or d.get('name') or d['id'])+'</option>' for d in available_dbs())
+ return '<meta charset=utf-8><a href="/">Kembali</a><h2>Pilih database Accurate</h2><p>Database dikunci setelah data diimpor atau disinkronkan. Gunakan instalasi terpisah untuk perusahaan lain.</p><form method="post" action="/databases/select"><select name="db_id" required>'+options+'</select><button>Simpan pilihan</button></form>'
+@app.post('/databases/select',dependencies=[Depends(auth)])
+async def select_database(r:Request):
+ guard(r); form=await r.form(); db_id=str(form.get('db_id',''))
+ if db_id not in {str(d['id']) for d in available_dbs()}: raise HTTPException(403,'Database tidak diizinkan')
+ with engine.begin() as c:
+  if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items, movements, bc IN SHARE ROW EXCLUSIVE MODE'))
+  old=c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()
+  if old!=db_id and any(c.execute(text('SELECT COUNT(*) FROM '+t)).scalar() for t in ('items','movements','bc')): raise HTTPException(409,'Data lokal sudah ada. Jangan mencampur perusahaan; gunakan database PostgreSQL baru atau migrasi terverifikasi.')
+  c.execute(text("INSERT INTO settings VALUES ('db_id',:v) ON CONFLICT(k) DO UPDATE SET v=:v"),{'v':db_id}); audit(c,'select database '+db_id)
+ return RedirectResponse('/',303)
 @app.post('/sync/items',dependencies=[Depends(auth)])
 def sync(r:Request):
- guard(r); h={'Authorization':'Bearer '+token()}; d=api('https://account.accurate.id/api/open-db.do',h,{'id':os.environ['ACCURATE_DB_ID']}); host=d['host']; u=urlparse(host)
+ guard(r); db_id=selected_db()
+ if not db_id: raise HTTPException(409,'Pilih database Accurate dahulu')
+ h={'Authorization':'Bearer '+token()}; d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id}); host=d['host']; u=urlparse(host)
  if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id'): raise HTTPException(502,'Host tidak valid')
  h['X-Session-ID']=d['session']; page=1; rows=[]
  while True:
@@ -71,6 +91,8 @@ def sync(r:Request):
   page+=1
   if page>1000: raise HTTPException(502,'Batas halaman')
  with engine.begin() as c:
+  if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, items IN SHARE ROW EXCLUSIVE MODE'))
+  if c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()!=db_id: raise HTTPException(409,'Pilihan database berubah; ulangi sinkronisasi')
   for x in rows: c.execute(text('INSERT INTO items(code,name) VALUES (:code,:name) ON CONFLICT(code) DO UPDATE SET name=:name'),{'code':x['no'],'name':x['name']})
   audit(c,'sync items '+str(len(rows)))
  return RedirectResponse('/',303)
@@ -90,6 +112,7 @@ def excel(headers,rows,name):
 @app.post('/import/{table}',dependencies=[Depends(auth)])
 def upload(r:Request,table:str,file:UploadFile=File(...)):
  guard(r)
+ if not selected_db(): raise HTTPException(409,'Pilih database Accurate sebelum import')
  if table not in HEADERS: raise HTTPException(404)
  try:
   raw=file.file.read(5_000_001)
@@ -133,7 +156,7 @@ def view(n:int,start:date,end:date,download:bool=False):
  return HTMLResponse('<meta charset=utf-8><a href="/">Kembali</a><h2>'+NAMES[n-1]+'</h2><p>Draft - belum tervalidasi</p><a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table>')
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
- return '<meta charset=utf-8><style>body{font:16px system-ui;max-width:1000px;margin:40px auto;padding:20px;background:#f4f7fb}section,form{background:white;padding:16px;margin:10px 0;border-radius:10px}button{padding:8px;background:#173b60;color:white;border:0;border-radius:5px}a{color:#173b60}</style><h1>IT Inventory Kawasan Berikat</h1><p>Versi uji • laporan belum tervalidasi</p><section><a href="/oauth/start">Hubungkan Accurate</a> | <a href="/databases">Daftar database</a><form method=post action="/sync/items"><button>Sinkron master barang</button></form></section><h2>Import data</h2>'+''.join(f'<form method=post enctype=multipart/form-data action="/import/{t}">{t} · <a href="/template/{t}">Template Excel</a> <input type=file name=file required accept=".xlsx"><button>Import</button></form>' for t in HEADERS)+'<h2>7 laporan</h2>'+''.join(f'<form action="/report/{i}"><b>{i}. {name}</b><br><input type=date name=start required> sampai <input type=date name=end required> <button>Lihat</button></form>' for i,name in enumerate(NAMES,1))
+ return '<meta charset=utf-8><style>body{font:16px system-ui;max-width:1000px;margin:40px auto;padding:20px;background:#f4f7fb}section,form{background:white;padding:16px;margin:10px 0;border-radius:10px}button{padding:8px;background:#173b60;color:white;border:0;border-radius:5px}a{color:#173b60}</style><h1>IT Inventory Kawasan Berikat</h1><p>Versi uji • laporan belum tervalidasi</p><section><a href="/oauth/start">Hubungkan Accurate</a> | <a href="/databases">Pilih database</a><form method=post action="/sync/items"><button>Sinkron master barang</button></form></section><h2>Import data</h2>'+''.join(f'<form method=post enctype=multipart/form-data action="/import/{t}">{t} · <a href="/template/{t}">Template Excel</a> <input type=file name=file required accept=".xlsx"><button>Import</button></form>' for t in HEADERS)+'<h2>7 laporan</h2>'+''.join(f'<form action="/report/{i}"><b>{i}. {name}</b><br><input type=date name=start required> sampai <input type=date name=end required> <button>Lihat</button></form>' for i,name in enumerate(NAMES,1))
 
 @app.get('/health')
 def health():

@@ -1,0 +1,3 @@
+# Update 1.1
+Ganti file repository dengan isi ZIP. Hapus ACCURATE_DB_ID dari Railway. TOKEN_KEY tetap wajib valid dan stabil. Jika belum pernah menyimpan token, buat dengan `python -c "import secrets,base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`. Jangan mengganti kunci lama jika sudah menyimpan token.
+Satu instalasi untuk satu perusahaan; pilihan database disimpan di PostgreSQL. Jika data lama sudah ada tanpa pilihan database, pemilihan ditolak untuk mencegah pencampuran; perlu migrasi terverifikasi atau instalasi baru. Tidak mendukung SaaS multi-tenant. API live belum diuji.
