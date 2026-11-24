@@ -2,7 +2,7 @@ import os, secrets, io, time, html, base64
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.fernet import InvalidToken
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import urlencode, urlparse
 import httpx
@@ -74,7 +74,7 @@ def available_dbs():
 def databases():
  current=selected_db(); esc=lambda x:html.escape(str(x),quote=True)
  options=''.join('<option value="'+esc(d['id'])+'"'+(' selected' if str(d['id'])==current else '')+'>'+esc(d.get('alias') or d.get('name') or d['id'])+'</option>' for d in available_dbs())
- return '<meta charset=utf-8><a href="/">Kembali</a><h2>Pilih database Accurate</h2><p>Database dikunci setelah data diimpor atau disinkronkan. Gunakan instalasi terpisah untuk perusahaan lain.</p><form method="post" action="/databases/select"><select name="db_id" required>'+options+'</select><button>Simpan pilihan</button></form>'
+ return page('Pilih database Accurate','<section><p>Database dikunci setelah data diimpor atau disinkronkan. Gunakan instalasi terpisah untuk perusahaan lain.</p><form method="post" action="/databases/select"><select name="db_id" required>'+options+'</select><button>Simpan pilihan</button></form></section>')
 @app.post('/databases/select',dependencies=[Depends(auth)])
 async def select_database(r:Request):
  guard(r); form=await r.form(); db_id=str(form.get('db_id',''))
@@ -160,10 +160,50 @@ def view(n:int,start:date,end:date,download:bool=False):
  h,rows=report(n,start,end)
  if download:return excel(h,rows,'laporan_'+str(n))
  esc=lambda x:html.escape(str(x if x is not None else 'BELUM LENGKAP'))
- return HTMLResponse('<meta charset=utf-8><a href="/">Kembali</a><h2>'+NAMES[n-1]+'</h2><p>Draft - belum tervalidasi</p><a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table>')
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft - belum tervalidasi</p><a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home():
- return '<meta charset=utf-8><style>body{font:16px system-ui;max-width:1000px;margin:40px auto;padding:20px;background:#f4f7fb}section,form{background:white;padding:16px;margin:10px 0;border-radius:10px}button{padding:8px;background:#173b60;color:white;border:0;border-radius:5px}a{color:#173b60}</style><h1>IT Inventory Kawasan Berikat</h1><p>Versi uji • laporan belum tervalidasi</p><section><a href="/oauth/start">Hubungkan Accurate</a> | <a href="/databases">Pilih database</a><form method=post action="/sync/items"><button>Sinkron master barang</button></form></section><h2>Import data</h2>'+''.join(f'<form method=post enctype=multipart/form-data action="/import/{t}">{t} · <a href="/template/{t}">Template Excel</a> <input type=file name=file required accept=".xlsx"><button>Import</button></form>' for t in HEADERS)+'<h2>7 laporan</h2>'+''.join(f'<form action="/report/{i}"><b>{i}. {name}</b><br><input type=date name=start required> sampai <input type=date name=end required> <button>Lihat</button></form>' for i,name in enumerate(NAMES,1))
+ with engine.connect() as c:
+  counts=[c.execute(text('SELECT COUNT(*) FROM '+t)).scalar() for t in ('items','movements','bc')]
+  connected=bool(c.execute(text("SELECT v FROM settings WHERE k='token'")).scalar())
+ db=selected_db()
+ esc=lambda x:html.escape(str(x))
+ stats=''.join(f'<article class="metric"><small>{label}</small><strong>{value:,}</strong></article>' for label,value in zip(['Master barang','Baris mutasi lokal','Dokumen BC'],counts))
+ body='<div class="metrics">'+stats+'</div><section id="integrasi"><h2>Integrasi Accurate Online</h2><p>Status OAuth: '+('Token tersimpan' if connected else 'Belum terhubung')+' · Database: '+esc(db or 'Belum dipilih')+'</p><div class="actions"><a class="btn" href="/oauth/start">Hubungkan Accurate</a><a class="btn secondary" href="/databases">Pilih database</a><form method="post" action="/sync/items"><button>Sinkron master barang</button></form></div><h3>Preview transaksi API (uji baca)</h3><p>Endpoint GET terkonfirmasi; mapping detail masih perlu validasi. Preview tidak mengubah transaksi atau laporan.</p><div class="actions">'+''.join(preview_form(k,v) for k,v in MODULES.items())+'</div></section>'
+ body+='<section id="import"><h2>Import data</h2>'+''.join(f'<form class="import" method="post" enctype="multipart/form-data" action="/import/{t}"><b>{label}</b><a href="/template/{t}">Template Excel</a><input type="file" name="file" required accept=".xlsx"><button>Import</button></form>' for t,label in zip(HEADERS,['Klasifikasi barang','Mutasi persediaan','Dokumen BC']))+'</section><section id="laporan"><h2>7 laporan Bea Cukai</h2><p class="notice">Draft — belum tervalidasi. Laporan menggunakan mutasi lokal, bukan hasil preview API.</p><div class="reports">'+''.join(f'<form class="report" action="/report/{i}"><small>LAPORAN {i:02}</small><h3>{name}</h3><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><button>Lihat laporan</button></form>' for i,name in enumerate(NAMES,1))+'</div></section>'
+ return page('Dashboard',body)
+
+# Professional interface and read-only transaction preview.
+from ui import page
+from accurate_read import MODULES, fetch_records, normalize
+
+def preview_form(k,v):
+ dates='' if k=='item' else '<label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label>'
+ return f'<form method="get" action="/sync/preview/{k}" class="report"><b>{v}</b>{dates}<label>Halaman<input type="number" name="page_no" min="1" value="1" required></label><button class="secondary">Baca data</button></form>'
+
+@app.get('/sync/preview/{module}', dependencies=[Depends(auth)])
+@app.post('/sync/preview/{module}', dependencies=[Depends(auth)])
+def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1):
+ if r.method=='POST': guard(r)
+ if module not in MODULES: raise HTTPException(404)
+ db_id=selected_db()
+ if not db_id: raise HTTPException(409,'Pilih database dahulu')
+ h={'Authorization':'Bearer '+token()}
+ d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id})
+ host=d['host']; u=urlparse(host)
+ if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password: raise HTTPException(502,'Host tidak valid')
+ h['X-Session-ID']=d['session']
+ try:
+  records=fetch_records(lambda path,params:api(host.rstrip('/')+'/accurate/api/'+path,h,params),module,start,end,page_no)
+  rows=[row for record in records for row in normalize(module,record)] if module!='item-adjustment' else []
+ except (ValueError,KeyError,TypeError,httpx.HTTPError,HTTPException) as e:
+  raise HTTPException(502,'Preview gagal. Periksa scope view, endpoint list/detail dan struktur response Accurate.') from e
+ if selected_db()!=db_id: raise HTTPException(409,'Database berubah')
+ if module=='item-adjustment':
+  import json
+  return HTMLResponse(page(MODULES[module], '<p class="notice">Data mentah; arah mutasi belum divalidasi.</p><section><pre>'+html.escape(json.dumps(records,ensure_ascii=False,indent=2))+'</pre></section>'))
+ headers=['Nomor','Tanggal','Kode','Nama','Qty','Satuan','Gudang','Referensi pekerjaan','Tipe']
+ return HTMLResponse(page(MODULES[module], '<p class="notice">Preview maksimal 20 transaksi per halaman. Belum dimasukkan ke buku mutasi. Verifikasi mapping dan satuan sebelum sinkronisasi resmi.</p><div class="table-wrap"><table><thead><tr>'+''.join('<th>'+x+'</th>' for x in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</tbody></table></div>'))
 
 @app.get('/health')
 def health():
