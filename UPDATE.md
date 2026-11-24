@@ -3,3 +3,9 @@ Backup PostgreSQL. Replace source files in GitHub, deploy Railway, keep SESSION_
 
 ## Hotfix v2.3.1
 Dockerfile sekarang menyalin scope_diag.py ke /app. Ganti Dockerfile di GitHub dan pastikan scope_diag.py ada di root repository. Tidak perlu mengubah environment atau database. Uji import lokal menggunakan SQLite; bukan uji deployment Railway.
+
+## v2.3.2 — Mapping preview
+- Normalisasi objek item/jobOrder secara aman; referensi pekerjaan sendiri untuk job-order.
+- Validasi kode, satuan, quantity per baris; baris valid tetap tampil.
+- Tidak mengubah database, OAuth atau transaksi Accurate. Item adjustment tetap raw preview.
+- Uji dengan response simulasi; response aktual belum diverifikasi.

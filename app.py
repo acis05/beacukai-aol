@@ -234,8 +234,8 @@ def preview(r:Request,module:str,start:str=None,end:str=None,page_no:int=1):
  rows=[]
  for record in records:
   if module=='item-adjustment': continue
-  try: rows.extend(normalize(module,record))
-  except Exception as e: issues.append('Mapping transaksi '+str(record.get('id','?'))+': '+type(e).__name__)
+  try: rows.extend(normalize(module,record,issues))
+  except Exception as e: issues.append('Mapping transaksi '+str(record.get('id','?'))+': '+(str(e) if isinstance(e,PreviewError) else type(e).__name__))
  headers=['Nomor','Tanggal','Kode','Nama','Qty','Satuan','Gudang','Referensi pekerjaan','Tipe']
  body='<section><p class="notice">Preview saja; tidak mengubah Accurate atau buku mutasi. Detail berhasil: '+str(len(records))+'; kendala: '+str(len(issues))+'</p><a class="btn secondary" href="/#integrasi">Kembali</a>'
  if issues: body+='<ul>'+''.join('<li>'+esc(x)+'</li>' for x in issues)+'</ul>'
