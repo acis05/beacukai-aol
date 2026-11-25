@@ -3,6 +3,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.fernet import InvalidToken
 from datetime import date, datetime
+from report_dates import date_columns, report_date
 from decimal import Decimal
 from urllib.parse import urlencode, urlparse
 import httpx
@@ -147,10 +148,12 @@ def template(table:str):
  return excel(HEADERS[table],[],table)
 def excel(headers,rows,name):
  w=Workbook(); s=w.active; s.append(headers)
+ dates=date_columns(headers)
  for row in rows:
-  s.append(list(row))
+  s.append([report_date(v) if i in dates else v for i,v in enumerate(row)])
   for cell in s[s.max_row]:
-   if isinstance(cell.value,str): cell.data_type='s'
+   if isinstance(cell.value,date): cell.number_format="dd-mm-yyyy"
+   elif isinstance(cell.value,str): cell.data_type='s'
    elif isinstance(cell.value,(int,float,Decimal)): cell.number_format='#,##0.##'
  b=io.BytesIO(); w.save(b); b.seek(0); return StreamingResponse(b,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':f'attachment; filename={name}.xlsx'})
 @app.post('/import/{table}',dependencies=[Depends(auth)])
@@ -214,6 +217,8 @@ def view(n:int,start:date,end:date,download:bool=False):
   unknown=c.execute(text("SELECT COUNT(*) FROM items WHERE category IS NULL OR category=''")).scalar()
  diagnostic='Total mutasi lokal: '+str(total)+'; periode: '+(', '.join(str(k)+': '+str(v) for k,v in diag) or '0 mutasi')+'; barang belum diklasifikasi: '+str(unknown)+'; baris laporan: '+str(len(rows))
  if download:return excel(h,rows,'laporan_'+str(n))
+ dates=date_columns(h)
+ rows=[tuple(report_date(v,display=True) if i in dates else v for i,v in enumerate(row)) for row in rows]
  esc=lambda x:html.escape(format(x,',.2f').rstrip('0').rstrip('.').translate(str.maketrans(',.','.,')) if isinstance(x,(Decimal,float)) else str(x if x is not None else ''))
  return HTMLResponse(page(NAMES[n-1],'<section><p>Draft dokumen BC otomatis dari deskripsi transaksi atau koreksi manual — belum tervalidasi. Nilai barang: cost transaksi jika tersedia. Opname: hasil terakhir dalam periode; kosong jika tidak tersedia atau beberapa dokumen pada tanggal terakhir.</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
