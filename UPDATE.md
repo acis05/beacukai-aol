@@ -1,3 +1,9 @@
+# v3.5 – Hotfix Sinkron Hasil Opname
+
+- Dockerfile sekarang menyalin opname.py ke image Railway.
+- Import modul opname berada dalam penanganan error.
+- Tidak ada perubahan skema database atau scope OAuth.
+
 ## v3.4
 - Perbaikan respons HTML halaman Dokumen Kepabeanan dan Riwayat Dokumen BC.
 - Branding AOLINX Bea Cukai Reports. Tidak ada migrasi database atau perubahan OAuth.

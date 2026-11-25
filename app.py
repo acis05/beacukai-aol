@@ -413,8 +413,8 @@ def sync_opname(r:Request,start:date=Form(...),end:date=Form(...)):
  if start>end: raise HTTPException(400,'Periode salah')
  db_id=selected_db()
  if not db_id: raise HTTPException(409,'Pilih database dahulu')
- from opname import collect_opname
  try:
+  from opname import collect_opname
   h={'Authorization':'Bearer '+token()}; d=api('https://account.accurate.id/api/open-db.do',h,{'id':db_id}); host=d['host']; u=urlparse(host)
   if u.scheme!='https' or not u.hostname or not u.hostname.endswith('.accurate.id') or u.username or u.password or u.query or u.fragment: raise ValueError('Host invalid')
   h['X-Session-ID']=d['session']
