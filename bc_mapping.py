@@ -5,15 +5,23 @@ import json
 def parse_bc(description):
     if not isinstance(description,str) or not description.strip(): return None, 'empty'
     parts=[p.strip() for p in description.split('|')]
-    if len(parts)!=3 or not re.fullmatch(r'BC\s*\d+(?:\.\d+)?',parts[0],re.I) or not parts[1] or len(parts[1])>120 or '\n' in parts[1]: return None,'invalid'
-    for fmt in ('%d/%m/%Y','%Y-%m-%d'):
+    if len(parts)!=3 or not re.fullmatch(r'BC\s*\.?\s*\d+(?:\.\d+)?',parts[0],re.I) or not parts[1] or len(parts[1])>120 or '\n' in parts[1]: return None,'invalid'
+    for fmt in ('%d/%m/%Y','%d-%m-%Y','%Y-%m-%d'):
         try: day=datetime.strptime(parts[2],fmt).date().isoformat(); break
         except ValueError: continue
     else: return None,'invalid'
-    return ('BC '+re.sub(r'^BC\s*','',parts[0],flags=re.I),parts[1],day),'accurate'
+    return (parts[0],parts[1],day),'accurate'
+
+def resolve_bc(row):
+    detail, ds = parse_bc(row.get('detailNotes'))
+    header, hs = parse_bc(row.get('description'))
+    if detail: return detail, 'accurate_detail'
+    if ds == 'invalid' and '|' in str(row.get('detailNotes')): return None, 'invalid'
+    if header: return header, 'accurate'
+    return None, hs
 
 def apply_bc(c,row,text):
-    ref=row['ref']; data,status=parse_bc(row.get('description'))
+    ref=row['ref']; data,status=resolve_bc(row)
     old=c.execute(text('SELECT doc_type,doc_no,doc_date FROM bc WHERE ref=:r'),{'r':ref}).fetchone()
     source=c.execute(text('SELECT source FROM bc_source WHERE ref=:r'),{'r':ref}).scalar()
     if source=='manual' or (old and source is None): return 'manual'

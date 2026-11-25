@@ -1,0 +1,2 @@
+# v3.7
+Replace source v3.6, keep Railway environment and persistent database. Redeploy. Synchronize Receive Item for 24 November 2026, then open report for that date. BC.21 | 12345 | 17/11/2026 is accepted verbatim. Manual > detailNotes > description. Malformed pipe-delimited detail blocks header fallback to avoid incorrect assignment. Existing preview Data detail API can verify actual returned fields. No live API verification. Item adjustment direction remains blocked pending actual JSON, as in v3.6. Existing database schema unchanged. Back up before deployment.
