@@ -3,7 +3,6 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.fernet import InvalidToken
 from datetime import date, datetime
-from report_dates import date_columns, report_date
 from decimal import Decimal
 from urllib.parse import urlencode, urlparse
 import httpx
@@ -16,6 +15,26 @@ from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import create_engine, text
 from openpyxl import load_workbook, Workbook
 from cryptography.fernet import Fernet
+
+def date_columns(headers):
+    return {i for i, h in enumerate(headers) if str(h).strip().lower().startswith("tanggal")}
+
+def report_date(value, display=False):
+    if value is None or value == "":
+        return value
+    if isinstance(value, datetime):
+        value = value.date()
+    if not isinstance(value, date):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                value = datetime.strptime(str(value), fmt).date()
+                break
+            except ValueError:
+                continue
+        else:
+            return value
+    return value.strftime("%d-%m-%Y") if display else value
+
 load_dotenv()
 session_secret=os.getenv('SESSION_SECRET','')
 if len(session_secret)<32 or session_secret.startswith(('change-me','ISI_','GANTI_')):
