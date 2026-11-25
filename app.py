@@ -215,7 +215,7 @@ def view(n:int,start:date,end:date,download:bool=False):
  diagnostic='Total mutasi lokal: '+str(total)+'; periode: '+(', '.join(str(k)+': '+str(v) for k,v in diag) or '0 mutasi')+'; barang belum diklasifikasi: '+str(unknown)+'; baris laporan: '+str(len(rows))
  if download:return excel(h,rows,'laporan_'+str(n))
  esc=lambda x:html.escape(format(x,',.2f').rstrip('0').rstrip('.').translate(str.maketrans(',.','.,')) if isinstance(x,(Decimal,float)) else str(x if x is not None else ''))
- return HTMLResponse(page(NAMES[n-1],'<section><p>Draft uji dokumen BC dari detail transaksi — belum tervalidasi. Nilai barang: cost transaksi jika tersedia. Opname: hasil terakhir dalam periode; kosong jika tidak tersedia atau beberapa dokumen pada tanggal terakhir.</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
+ return HTMLResponse(page(NAMES[n-1],'<section><p>Draft dokumen BC otomatis dari deskripsi transaksi atau koreksi manual — belum tervalidasi. Nilai barang: cost transaksi jika tersedia. Opname: hasil terakhir dalam periode; kosong jika tidak tersedia atau beberapa dokumen pada tanggal terakhir.</p><p>'+esc(diagnostic)+'</p>'+('<p class="notice">Kategori Accurate: '+('Bahan Baku' if n==3 else 'Barang Jadi')+'. Sumber: histori transaksi lokal hasil sinkronisasi Accurate; saldo awal belum tervalidasi. <a href="/stock-history">Preview histori API 7 hari</a>.</p>' if n in (3,4) else '')+'<a class="btn secondary" href="/#sinkron">Sinkronisasi transaksi</a> '+('<p class="notice">Tidak ada mutasi lokal sesuai periode/kategori. Periksa hasil sinkronisasi, tanggal transaksi, master dan satuan barang.</p>' if not rows else '')+'<a href="?start='+str(start)+'&end='+str(end)+'&download=true">Excel</a><table border=1 cellpadding=8><tr>'+''.join('<th>'+esc(x)+'</th>' for x in h)+'</tr>'+''.join('<tr>'+''.join('<td>'+esc(x)+'</td>' for x in row)+'</tr>' for row in rows)+'</table></section>'))
 @app.get('/',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def home(r:Request):
  with engine.connect() as c:
@@ -333,6 +333,7 @@ def health():
  return {'status':'ok'}
 
 from sync_inventory import collect, MODULES as SYNC_MODULES
+from bc_mapping import apply_bc
 
 def sync_panel():
  return '<section id="sinkron"><h2>Sinkronisasi transaksi Accurate</h2><p class="notice">Mode draft: penerimaan/pengiriman diasumsikan mutasi eksternal; validasi kepabeanan tetap diperlukan. Penyesuaian belum diposting otomatis. Jangan sinkronkan periode yang sudah diimport manual.</p><form id="batch-sync" method="post" action="/sync/transactions"><label>Mulai<input type="date" name="start" required></label><label>Sampai<input type="date" name="end" required></label><label>Modul<select name="module"><option value="all">Semua transaksi</option>'+''.join('<option value="'+k+'">'+MODULES[k]+'</option>' for k in SYNC_MODULES)+'</select></label><label><input type="checkbox" name="confirm" value="yes" required> Saya sudah memeriksa klasifikasi, satuan, dan tidak ada duplikasi import manual.</label><label><input type="checkbox" name="unfiltered" value="yes"> Diagnostik: baca semua halaman tanpa filter tanggal API (tanggal disaring lokal)</label><button>Sinkronisasi transaksi</button></form><p id="batch-status" role="status"></p><div id="batch-results"></div></section>' + BATCH_SCRIPT
@@ -366,12 +367,16 @@ def sync_transactions(r:Request,start:date=Form(...),end:date=Form(...),module:s
      if any(not x.startswith(f'AOL:{db_id}:') for x in existing): raise ValueError('Ada mutasi manual pada periode; rekonsiliasi dahulu')
      newrefs={x['ref'] for x in rows}
      if any(x.startswith(prefix) and x not in newrefs for x in existing): raise ValueError('Transaksi lama hilang/berubah tanggal; rekonsiliasi manual diperlukan')
+     bc_counts={}
      for row in rows:
       if engine.dialect.name=='postgresql': row['qty']=Decimal(row['qty'])
       c.execute(text('INSERT INTO movements(ref,day,code,qty,kind) VALUES (:ref,:day,:code,:qty,:kind) ON CONFLICT(ref) DO UPDATE SET day=:day,code=:code,qty=:qty,kind=:kind'),row)
+      status=apply_bc(c,row,text)
+      bc_counts[status]=bc_counts.get(status,0)+1
+      c.execute(text('INSERT INTO movement_meta(ref,number,party) VALUES (:ref,:number,:party) ON CONFLICT(ref) DO UPDATE SET number=:number,party=:party'),row)
       if k in ('receive-item','delivery-order'):
-       c.execute(text('INSERT INTO movement_meta(ref,number,party) VALUES (:ref,:number,:party) ON CONFLICT(ref) DO UPDATE SET number=:number,party=:party'),row)
        c.execute(text('INSERT INTO movement_cost(ref,value) VALUES (:ref,:value) ON CONFLICT(ref) DO UPDATE SET value=:value'),{'ref':row['ref'],'value':Decimal(row['value']) if row.get('value') is not None and engine.dialect.name=='postgresql' else row.get('value')})
+     summary+='; BC: '+', '.join(f'{label}={bc_counts.get(key,0)}' for key,label in [('accurate','Accurate'),('manual','Manual'),('empty','Belum lengkap'),('invalid','Format salah')])
      audit(c,'sync '+k+' '+str(len(rows)))
     results.append((MODULES[k],len(rows),'Disimpan/diperbarui; '+summary+('; KENDALA: '+'; '.join(issues[:30]) if issues else '') if rows else 'Tidak ada mutasi; '+summary))
    except Exception as e: results.append((MODULES[k],0,'Gagal: '+(str(e) if isinstance(e,ValueError) else type(e).__name__)))
@@ -465,20 +470,23 @@ with engine.begin() as c:
  c.execute(text('CREATE TABLE IF NOT EXISTS movement_meta (ref VARCHAR(200) PRIMARY KEY, number TEXT, party TEXT)'))
  c.execute(text('CREATE TABLE IF NOT EXISTS customs_audit (stamp TEXT, username TEXT, ref VARCHAR(200), old_data TEXT, new_data TEXT)'))
 
+with engine.begin() as c:
+ c.execute(text('CREATE TABLE IF NOT EXISTS bc_source (ref VARCHAR(200) PRIMARY KEY, source VARCHAR(20) NOT NULL)'))
+
 @app.get('/customs',response_class=HTMLResponse,dependencies=[Depends(auth)])
-def customs(r:Request,start:date=None,end:date=None,q:str='',kind:str='',pending:bool=False):
+def customs(r:Request,start:date=None,end:date=None,q:str='',kind:str='',pending:bool=False,source:str=''):
  esc=lambda x:html.escape(str(x if x is not None else ''),quote=True)
  start=start or date.today().replace(day=1); end=end or date.today()
  if start>end: raise HTTPException(400,'Periode tidak valid')
  db=selected_db()
  with engine.connect() as c:
-  rows=c.execute(text("SELECT m.ref,m.day,m.kind,m.code,i.name,i.unit,m.qty,mm.number,mm.party,b.doc_type,b.doc_no,b.doc_date FROM movements m JOIN items i ON i.code=m.code LEFT JOIN movement_meta mm ON mm.ref=m.ref LEFT JOIN bc b ON b.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.kind IN ('IN','OUT') AND m.ref LIKE :prefix ORDER BY m.day,m.ref"),{'a':str(start),'b':str(end),'prefix':f'AOL:{db}:%'}).fetchall()
- rows=[x for x in rows if (not kind or x[2]==kind) and (not q or q.casefold() in ' '.join(str(v or '') for v in x).casefold()) and (not pending or not all(x[9:12]))]
- body=f'<section><form class="actions"><label>Mulai<input type="date" name="start" value="{start}"></label><label>Sampai<input type="date" name="end" value="{end}"></label><label>Cari<input name="q" value="{esc(q)}"></label><label>Jenis transaksi<select name="kind"><option value="">Semua</option><option value="IN" {"selected" if kind=="IN" else ""}>Penerimaan</option><option value="OUT" {"selected" if kind=="OUT" else ""}>Pengiriman</option></select></label><label><input type="checkbox" name="pending" value="true" {"checked" if pending else ""}>Belum lengkap</label><button>Cari</button></form></section>'
- body+=f'<section><h2>{len(rows)} baris barang</h2><p>Pilih satu atau beberapa baris, termasuk lintas transaksi. Data yang sudah lengkap tidak ditimpa kecuali diizinkan.</p><form method="post" action="/customs/save"><div class="actions"><label>Jenis BC<input name="doc_type" required maxlength="40" placeholder="BC 2.3"></label><label>Nomor BC<input type="text" name="doc_no" required maxlength="120"></label><label>Tanggal BC<input type="date" name="doc_date" required></label><label><input type="checkbox" name="overwrite" value="yes">Izinkan timpa data BC</label><button>Simpan pilihan</button></div><table><tr><th><input type="checkbox" aria-label="Pilih semua" onchange="document.querySelectorAll(` [name=ref] `.trim()).forEach(x=>x.checked=this.checked)"></th><th>Tanggal transaksi</th><th>Jenis transaksi</th><th>Nomor transaksi</th><th>Supplier / Customer</th><th>Kode</th><th>Barang</th><th>Qty</th><th>Satuan</th><th>Jenis BC</th><th>Nomor BC</th><th>Tanggal BC</th></tr>'
+  rows=c.execute(text("SELECT m.ref,m.day,m.kind,m.code,i.name,i.unit,m.qty,mm.number,mm.party,b.doc_type,b.doc_no,b.doc_date,COALESCE(bs.source,CASE WHEN b.ref IS NOT NULL THEN 'manual' ELSE 'empty' END) FROM movements m JOIN items i ON i.code=m.code LEFT JOIN movement_meta mm ON mm.ref=m.ref LEFT JOIN bc b ON b.ref=m.ref LEFT JOIN bc_source bs ON bs.ref=m.ref WHERE m.day BETWEEN :a AND :b AND m.ref LIKE :prefix ORDER BY m.day,m.ref"),{'a':str(start),'b':str(end),'prefix':f'AOL:{db}:%'}).fetchall()
+ rows=[x for x in rows if (not kind or x[2]==kind) and (not q or q.casefold() in ' '.join(str(v or '') for v in x).casefold()) and (not pending or not all(x[9:12])) and (not source or x[12]==source)]
+ body=f'<section><form class="actions"><label>Mulai<input type="date" name="start" value="{start}"></label><label>Sampai<input type="date" name="end" value="{end}"></label><label>Cari<input name="q" value="{esc(q)}"></label><label>Jenis transaksi<select name="kind"><option value="">Semua</option><option value="IN" {"selected" if kind=="IN" else ""}>Penerimaan</option><option value="OUT" {"selected" if kind=="OUT" else ""}>Pengiriman</option><option value="PROD" {"selected" if kind=="PROD" else ""}>Produksi</option><option value="ADJ" {"selected" if kind=="ADJ" else ""}>Penyesuaian</option></select></label><label><input type="checkbox" name="pending" value="true" {"checked" if pending else ""}>Belum lengkap</label><label>Sumber BC<select name="source"><option value="" {"selected" if source=="" else ""}>Semua</option><option value="accurate" {"selected" if source=="accurate" else ""}>Accurate</option><option value="manual" {"selected" if source=="manual" else ""}>Manual</option><option value="empty" {"selected" if source=="empty" else ""}>Belum lengkap</option><option value="invalid" {"selected" if source=="invalid" else ""}>Format salah</option></select></label><button>Cari</button></form></section>'
+ body+=f'<section><h2>{len(rows)} baris barang</h2><p>Pilih satu atau beberapa baris, termasuk lintas transaksi. Data yang sudah lengkap tidak ditimpa kecuali diizinkan.</p><form method="post" action="/customs/save"><div class="actions"><label>Jenis BC<input name="doc_type" required maxlength="40" placeholder="BC 2.3"></label><label>Nomor BC<input type="text" name="doc_no" required maxlength="120"></label><label>Tanggal BC<input type="date" name="doc_date" required></label><label><input type="checkbox" name="overwrite" value="yes">Izinkan timpa data BC</label><button>Simpan pilihan</button></div><table><tr><th><input type="checkbox" aria-label="Pilih semua" onchange="document.querySelectorAll(` [name=ref] `.trim()).forEach(x=>x.checked=this.checked)"></th><th>Tanggal transaksi</th><th>Jenis transaksi</th><th>Nomor transaksi</th><th>Supplier / Customer</th><th>Kode</th><th>Barang</th><th>Qty</th><th>Satuan</th><th>Jenis BC</th><th>Nomor BC</th><th>Tanggal BC</th><th>Sumber BC</th></tr>'
  for x in rows:
-  ref,day,k,code,name,unit,qty,number,party,dt,dn,dd=x
-  vals=[day,'Penerimaan' if k=='IN' else 'Pengiriman',number or ref,party,code,name,format(abs(Decimal(str(qty))),',.2f').rstrip('0').rstrip('.'),unit,dt,dn,dd]
+  ref,day,k,code,name,unit,qty,number,party,dt,dn,dd,src=x
+  vals=[day,MODULES.get(ref.split(':')[2],k),number or ref,party,code,name,format(abs(Decimal(str(qty))),',.2f').rstrip('0').rstrip('.'),unit,dt,dn,dd,{"accurate":"Accurate","manual":"Manual","empty":"Belum lengkap","invalid":"Format salah"}.get(src,src)]
   body+='<tr><td><input type="checkbox" name="ref" value="'+esc(ref)+'"></td>'+''.join('<td>'+esc(v)+'</td>' for v in vals)+'</tr>'
  return page('Dokumen Kepabeanan',body+'</table></form></section><section><a href="/customs/audit">Riwayat perubahan</a></section>')
 
@@ -493,14 +501,15 @@ async def customs_save(r:Request):
   if engine.dialect.name=='postgresql': c.execute(text('LOCK TABLE settings, movements, bc IN SHARE ROW EXCLUSIVE MODE'))
   db=c.execute(text("SELECT v FROM settings WHERE k='db_id'")).scalar()
   for ref in refs:
-   if not db or not ref.startswith(f'AOL:{db}:') or not c.execute(text("SELECT ref FROM movements WHERE ref=:r AND kind IN ('IN','OUT')"),{'r':ref}).scalar(): raise HTTPException(400,'Referensi transaksi tidak valid')
+   if not db or not ref.startswith(f'AOL:{db}:') or not c.execute(text("SELECT ref FROM movements WHERE ref=:r"),{'r':ref}).scalar(): raise HTTPException(400,'Referensi transaksi tidak valid')
    old=c.execute(text('SELECT doc_type,doc_no,doc_date FROM bc WHERE ref=:r'),{'r':ref}).fetchone()
    if old and any(old) and f.get('overwrite')!='yes': raise HTTPException(409,'Ada data BC terisi. Tidak ada perubahan disimpan; pilih baris kosong atau izinkan timpa.')
    c.execute(text('INSERT INTO bc VALUES (:r,:t,:n,:d) ON CONFLICT(ref) DO UPDATE SET doc_type=:t,doc_no=:n,doc_date=:d'),{'r':ref,'t':dt,'n':dn,'d':dd})
+   c.execute(text("INSERT INTO bc_source(ref,source) VALUES (:r,'manual') ON CONFLICT(ref) DO UPDATE SET source='manual'"),{'r':ref})
    c.execute(text('INSERT INTO customs_audit VALUES (:s,:u,:r,:o,:n)'),{'s':datetime.utcnow().isoformat()+'Z','u':r.state.username,'r':ref,'o':json.dumps(list(old) if old else None),'n':json.dumps([dt,dn,dd])})
  return HTMLResponse(page('Dokumen BC tersimpan',f'<section>{len(refs)} baris diperbarui. <a href="/customs">Kembali</a></section>'))
 
 @app.get('/customs/audit',response_class=HTMLResponse,dependencies=[Depends(auth)])
 def customs_audit():
  with engine.connect() as c: rows=c.execute(text('SELECT * FROM customs_audit ORDER BY stamp DESC LIMIT 500')).fetchall()
- return page('Riwayat Dokumen BC','<section><table><tr><th>Waktu UTC</th><th>Pengguna</th><th>Referensi</th><th>Sebelum</th><th>Sesudah</th></tr>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</table></section>')
+ return HTMLResponse(page('Riwayat Dokumen BC','<section><table><tr><th>Waktu UTC</th><th>Pengguna</th><th>Referensi</th><th>Sebelum</th><th>Sesudah</th></tr>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</table></section>'))
